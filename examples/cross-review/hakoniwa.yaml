@@ -1,0 +1,75 @@
+# cross-review — Hakoniwa example (#2)
+#
+# Use case: a producer agent generates an artifact, then two reviewer agents
+# independently review it (fan-out), and a merger agent joins their feedback
+# (fan-in) to produce the final output.
+#
+# Run with: hako up
+# Tear down: hako down
+# Preview:   hako plan
+
+name: cross-review
+
+defaults:
+  policy:
+    default: balanced      # balanced preset: outbound HTTPS allowed, deny-all else
+    allow_widening: false  # per-agent allow rules are blocked (reviewers cannot open new egress)
+  kits:
+    - oci://registry.example.com/kits/base:1.0   # shared base kit for all agents
+
+channels:
+  - artifact.ready    # fired by producer when the artifact is written
+  - review.alpha      # fired by reviewer-alpha when its review is complete
+  - review.beta       # fired by reviewer-beta when its review is complete
+
+agents:
+
+  producer:
+    agent: claude
+    resources: { cpus: 2, memory: 4096 }
+    secrets:
+      - { value: "gh auth token", env: GH_TOKEN, host: api.github.com }
+    policy:
+      network:
+        deny: ["*.telemetry.io"]     # deny telemetry that the base kit might phone home to
+    emits: [artifact.ready]
+    # Prompt the agent to produce the artifact and write its result to:
+    #   /root/.hako/out/artifact.ready.json
+    # (This is done by the initial prompt injected by the orchestrator.)
+
+  reviewer-alpha:
+    agent: codex
+    resources: { cpus: 2, memory: 4096 }
+    secrets:
+      - { value: "op://vault/openai/api-key", env: OPENAI_API_KEY }
+    policy:
+      network:
+        deny: ["*.telemetry.io", "*.statsig.com"]
+    depends_on:
+      producer: { condition: on_event, channel: artifact.ready }
+    subscribes: [artifact.ready]
+    emits: [review.alpha]
+
+  reviewer-beta:
+    agent: gemini
+    resources: { cpus: 2, memory: 4096 }
+    secrets:
+      - { value: "op://vault/google/api-key", env: GOOGLE_API_KEY }
+    policy:
+      network:
+        deny: ["*.telemetry.io"]
+    depends_on:
+      producer: { condition: on_event, channel: artifact.ready }
+    subscribes: [artifact.ready]
+    emits: [review.beta]
+
+  merger:
+    agent: claude
+    resources: { cpus: 2, memory: 4096 }
+    # Fan-in: merger waits for BOTH reviewers before starting.
+    depends_on:
+      reviewer-alpha: { condition: on_event, channel: review.alpha }
+      reviewer-beta:  { condition: on_event, channel: review.beta }
+    subscribes: [review.alpha, review.beta]
+    # Merger writes its consolidated output to /root/.hako/out/merged.json
+    # (no emits declared — it is the terminal node).

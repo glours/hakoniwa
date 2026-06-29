@@ -1,0 +1,69 @@
+# debug-collab — Hakoniwa example (#4)
+#
+# Use case: a reproducer agent creates a minimal reproducible bug report,
+# a fixer agent receives it and produces a patch (reaching back into the
+# reproducer's sandbox to inspect live state), and a test-writer agent
+# generates regression tests from the patch.
+#
+# Run with: hako up
+# Tear down: hako down
+# Preview:   hako plan
+
+name: debug-collab
+
+defaults:
+  policy:
+    default: deny-all       # strict: deny all outbound by default
+    allow_widening: true    # allow per-agent allow rules (fixer needs to reach reproducer)
+  kits:
+    - oci://registry.example.com/kits/debug-base:2.0
+
+channels:
+  - repro.ready    # fired by reproducer when the bug is reproduced and state is live
+  - fix.ready      # fired by fixer when the patch is ready
+
+agents:
+
+  reproducer:
+    agent: claude
+    template: node          # Node.js container image for the bug environment
+    resources: { cpus: 4, memory: 8192 }
+    ports:
+      - "8080:8080"         # HTTP API exposed so the fixer can inspect live state
+    secrets:
+      - { value: "gh auth token", env: GH_TOKEN, host: api.github.com }
+    policy:
+      network:
+        allow: ["api.github.com"]    # allow pulling the failing repo
+    emits: [repro.ready]
+
+  fixer:
+    agent: codex
+    resources: { cpus: 4, memory: 8192 }
+    secrets:
+      - { value: "op://vault/openai/api-key", env: OPENAI_API_KEY }
+    policy:
+      network:
+        allow: ["api.github.com", "*.npmjs.com"]   # pull dependencies for the fix
+    depends_on:
+      reproducer: { condition: on_event, channel: repro.ready }
+    subscribes: [repro.ready]
+    # reach: connect to the reproducer's live HTTP API to inspect running state.
+    # The orchestrator publishes reproducer:8080 and injects:
+    #   HAKO_REACH_REPRODUCER_8080=host.docker.internal:<host-port>
+    reach: ["reproducer:8080"]
+    emits: [fix.ready]
+
+  test-writer:
+    agent: gemini
+    resources: { cpus: 2, memory: 4096 }
+    kits:
+      - ./kits/test-runner    # local kit with test framework pre-installed
+    policy:
+      network:
+        allow: ["*.npmjs.com"]    # install test dependencies
+    depends_on:
+      fixer: { condition: on_event, channel: fix.ready }
+    subscribes: [fix.ready]
+    # test-writer produces the regression test suite at:
+    #   /root/.hako/out/tests.json (metadata) + /root/tests/ (test files)
