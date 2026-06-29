@@ -62,7 +62,7 @@ func resolveOne(name string, agent *Agent, defaults *Defaults) *EffectiveAgent {
 		DependsOn:            copyDependsOn(agent.DependsOn),
 		Reach:                append([]string(nil), agent.Reach...),
 		Ports:                append([]string(nil), agent.Ports...),
-		Policy:               agent.Policy,
+		Policy:               copyAgentPolicy(agent.Policy),
 		ProjectPolicyDefault: defaults.Policy.Default,
 		AllowWidening:        defaults.Policy.AllowWidening,
 	}
@@ -110,6 +110,17 @@ func mergeResources(projectDefault, agent Resources) Resources {
 		r.Memory = projectDefault.Memory
 	}
 	return r
+}
+
+// copyAgentPolicy returns a deep copy of an AgentPolicy, ensuring the
+// Allow/Deny slices in the embedded NetworkPolicy are independent.
+func copyAgentPolicy(p AgentPolicy) AgentPolicy {
+	return AgentPolicy{
+		Network: NetworkPolicy{
+			Allow: append([]string(nil), p.Network.Allow...),
+			Deny:  append([]string(nil), p.Network.Deny...),
+		},
+	}
 }
 
 // copyDependsOn makes a shallow copy of a depends_on map so the EffectiveAgent

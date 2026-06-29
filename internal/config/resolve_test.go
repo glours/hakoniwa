@@ -199,23 +199,40 @@ func TestResolveAgentsAgentFieldPrecedence(t *testing.T) {
 func TestResolveAgentsDefensiveCopy(t *testing.T) {
 	// Mutations to the original Agent slices should not affect the EffectiveAgent.
 	agent := &config.Agent{
-		Agent:   "claude",
-		Emits:   []string{"ch.a"},
-		Ports:   []string{"8080:8080"},
-		Secrets: []config.Secret{{Env: "TOK", Value: "echo x"}},
+		Agent:      "claude",
+		Emits:      []string{"ch.a"},
+		Subscribes: []string{"ch.b"},
+		Reach:      []string{"other:8080"},
+		Ports:      []string{"8080:8080"},
+		Secrets:    []config.Secret{{Env: "TOK", Value: "echo x"}},
+		Policy: config.AgentPolicy{
+			Network: config.NetworkPolicy{
+				Allow: []string{"*.github.com"},
+				Deny:  []string{"*.telemetry.io"},
+			},
+		},
 	}
 	p := &config.Project{Name: "test", Agents: map[string]*config.Agent{"a": agent}}
 	agents := config.ResolveAgents(p)
 	ea := agents["a"]
 
-	// Mutate original slices.
+	// Mutate original slices via append (new backing array may not change ea,
+	// but in-place element overwrites always would).
 	agent.Emits = append(agent.Emits, "ch.extra")
 	agent.Ports[0] = "9999:9999"
+	agent.Policy.Network.Allow[0] = "*.evil.com"
+	agent.Policy.Network.Deny = append(agent.Policy.Network.Deny, "*.extra.io")
 
 	if len(ea.Emits) != 1 {
 		t.Errorf("ea.Emits affected by original mutation: %v", ea.Emits)
 	}
 	if ea.Ports[0] != "8080:8080" {
 		t.Errorf("ea.Ports affected by original mutation: %v", ea.Ports)
+	}
+	if ea.Policy.Network.Allow[0] != "*.github.com" {
+		t.Errorf("ea.Policy.Network.Allow affected by original mutation: %v", ea.Policy.Network.Allow)
+	}
+	if len(ea.Policy.Network.Deny) != 1 {
+		t.Errorf("ea.Policy.Network.Deny affected by original mutation: %v", ea.Policy.Network.Deny)
 	}
 }
