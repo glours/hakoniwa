@@ -55,7 +55,9 @@ func TestLogsSubcmd(t *testing.T) {
 }
 
 func TestSubcmdStubs(t *testing.T) {
-	for _, sub := range []string{"up", "down", "plan", "ps", "logs"} {
+	// Commands still using the notImplemented stub.
+	// Remove entries here as they are wired up.
+	for _, sub := range []string{"down", "plan", "ps", "logs"} {
 		root := newRootCmd()
 		buf := &bytes.Buffer{}
 		root.SetOut(buf)
