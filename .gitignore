@@ -1,0 +1,33 @@
+# Binaries
+/hako
+/hakoniwa
+
+# Build output
+/bin/
+/dist/
+
+# Go test cache
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor
+/vendor/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env.local
