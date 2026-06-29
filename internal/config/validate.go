@@ -172,6 +172,9 @@ func Validate(r *LoadResult) *ValidationError {
 	channelSet := validateChannels(p, errorf)
 	validateChannelRefs(p, channelSet, agentNames, errorf)
 
+	// -- Reach validation --
+	validateReach(p, agentNames, errorf)
+
 	// -- DAG acyclicity --
 	if cycle := detectCycle(p.Agents); cycle != nil {
 		errorf("agents", fmt.Sprintf("dependency cycle detected: %s", strings.Join(cycle, " -> ")))
@@ -371,4 +374,71 @@ func validateChannelRefs(p *Project, channelSet map[string]struct{}, agentNames 
 			}
 		}
 	}
+}
+
+// validateReach checks each agent's reach[] entries:
+//   - format: "<agent-id>:<port>" where port is a decimal integer
+//   - the target agent must be defined
+//   - the port must appear in the target agent's declared ports
+//
+// validateReach is called from Validate; agentNames must be pre-sorted.
+func validateReach(p *Project, agentNames []string, errorf func(path, msg string)) {
+	for _, name := range agentNames {
+		agent := p.Agents[name]
+		base := "agents." + name
+
+		for i, r := range agent.Reach {
+			path := fmt.Sprintf("%s.reach[%d]", base, i)
+
+			// Expect "<agent>:<port>".
+			colon := strings.LastIndex(r, ":")
+			if colon < 0 {
+				errorf(path, fmt.Sprintf("reach entry %q is invalid: expected <agent>:<port>", r))
+				continue
+			}
+			targetAgent := r[:colon]
+			portStr := r[colon+1:]
+
+			if targetAgent == "" {
+				errorf(path, fmt.Sprintf("reach entry %q: agent name is empty", r))
+				continue
+			}
+			target, ok := p.Agents[targetAgent]
+			if !ok {
+				errorf(path, fmt.Sprintf("reach entry %q: agent %q is not defined", r, targetAgent))
+				continue
+			}
+			// The port must appear as the sandbox port in the target's ports list.
+			if !agentPublishesPort(target.Ports, portStr) {
+				errorf(path, fmt.Sprintf(
+					"reach entry %q: agent %q does not publish sandbox port %s (declared ports: %v)",
+					r, targetAgent, portStr, target.Ports,
+				))
+			}
+		}
+	}
+}
+
+// agentPublishesPort returns true if any port spec in specs has sandboxPort as its sandbox port.
+func agentPublishesPort(specs []string, sandboxPort string) bool {
+	for _, spec := range specs {
+		// Strip proto suffix.
+		if idx := strings.LastIndex(spec, "/"); idx >= 0 {
+			spec = spec[:idx]
+		}
+		parts := strings.Split(spec, ":")
+		var sp string
+		switch len(parts) {
+		case 2:
+			sp = parts[1]
+		case 3:
+			sp = parts[2]
+		default:
+			continue
+		}
+		if sp == sandboxPort {
+			return true
+		}
+	}
+	return false
 }

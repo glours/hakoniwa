@@ -77,7 +77,7 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 					return err
 				}
 			}
-			if err := o.driveSession(ctx, agentName, ea, reg); err != nil {
+			if err := o.driveSession(ctx, agentName, ea, reg, agents); err != nil {
 				return err
 			}
 		}
@@ -88,17 +88,32 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 }
 
 // driveSession opens an agent session, drives it to completion, and fires
-// any channels the agent emits.
+// any channels the agent emits. Reach env vars (HAKO_REACH_*) are resolved
+// before opening the session and forwarded in AgentSessionRequest.Env.
 func (o *Orchestrator) driveSession(
 	ctx context.Context,
 	agentName string,
 	ea *config.EffectiveAgent,
 	reg *ChannelRegistry,
+	agents map[string]*config.EffectiveAgent,
 ) error {
 	sbxName := o.SandboxName(agentName)
 	fmt.Fprintf(o.Out, "[%s] attaching agent session on %s\n", agentName, sbxName)
 
-	session, err := o.Driver.AttachAgentSession(ctx, sbxName, sandboxapi.AgentSessionRequest{})
+	// Resolve reach env vars before opening the session.
+	reachEnv, err := o.ApplyReach(ctx, agentName, ea, agents)
+	if err != nil {
+		return err
+	}
+
+	var env *map[string]string
+	if len(reachEnv) > 0 {
+		env = &reachEnv
+	}
+
+	session, err := o.Driver.AttachAgentSession(ctx, sbxName, sandboxapi.AgentSessionRequest{
+		Env: env,
+	})
 	if err != nil {
 		return fmt.Errorf("[%s] attach session: %w", agentName, err)
 	}
