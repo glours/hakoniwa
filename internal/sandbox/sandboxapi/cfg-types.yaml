@@ -1,0 +1,4 @@
+package: sandboxapi
+output: types.gen.go
+generate:
+  models: true

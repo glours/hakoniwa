@@ -1,0 +1,18 @@
+package: sandboxapi
+output: client.gen.go
+generate:
+  client: true
+  models: false
+output-options:
+  # Streaming and HTTP-upgrade endpoints are excluded from generated client
+  # emission (same pattern as docker/sandboxes upstream). These operations
+  # need raw net.Conn / streaming io.Reader access that io.ReadAll defeats.
+  # They are implemented by hand in the parent package when needed.
+  exclude-operation-ids:
+    - pullImage
+    - exportImage
+    - getFile
+    - putFile
+    - attachExec
+    - attachAgentSession
+    - sessionHold
