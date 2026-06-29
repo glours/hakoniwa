@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
@@ -61,11 +60,4 @@ multi-agent applications where each AI agent runs in its own Docker Sandbox.`,
 
 func notImplemented(cmd *cobra.Command, _ []string) error {
 	return fmt.Errorf("%s: not implemented yet", cmd.Name())
-}
-
-// exitErr prints err to stderr and returns exit code 1. Used by commands that
-// cannot propagate errors through cobra (e.g. PersistentPreRun).
-func exitErr(err error) {
-	fmt.Fprintf(os.Stderr, "hako: %v\n", err)
-	os.Exit(1)
 }

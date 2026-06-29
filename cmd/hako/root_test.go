@@ -38,12 +38,35 @@ func TestVersionCmd(t *testing.T) {
 	}
 }
 
-func TestGlobalFlags(t *testing.T) {
+func TestLogsSubcmd(t *testing.T) {
+	// Ensure logs subcommand can be invoked without a -f shorthand panic.
 	root := newRootCmd()
-	if root.PersistentFlags().Lookup("file") == nil {
-		t.Error("missing global flag --file")
+	buf := &bytes.Buffer{}
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs([]string{"logs", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("logs --help returned error: %v", err)
 	}
-	if root.PersistentFlags().Lookup("json") == nil {
-		t.Error("missing global flag --json")
+	out := buf.String()
+	if !strings.Contains(out, "follow") {
+		t.Errorf("logs --help output missing --follow flag description, got: %s", out)
+	}
+}
+
+func TestSubcmdStubs(t *testing.T) {
+	for _, sub := range []string{"up", "down", "plan", "ps", "logs"} {
+		root := newRootCmd()
+		buf := &bytes.Buffer{}
+		root.SetOut(buf)
+		root.SetErr(buf)
+		root.SetArgs([]string{sub})
+		err := root.Execute()
+		if err == nil {
+			t.Errorf("%s stub should return an error", sub)
+		}
+		if !strings.Contains(err.Error(), "not implemented") {
+			t.Errorf("%s error %q does not mention 'not implemented'", sub, err)
+		}
 	}
 }

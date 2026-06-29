@@ -9,6 +9,6 @@ func newLogsCmd(file *string, jsonOutput *bool) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  notImplemented,
 	}
-	cmd.Flags().BoolP("follow", "f", false, "follow log output")
+	cmd.Flags().Bool("follow", false, "follow log output")
 	return cmd
 }
