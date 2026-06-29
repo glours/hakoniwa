@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,7 +78,7 @@ var validConditions = map[DependsOnCondition]bool{
 // Validate runs layer-1 static validation on a loaded project file.
 // It is a pure function of the file — no system access is needed.
 //
-// Checks performed (Epic 1 scope; channel/on_event/reach checks deferred to Epic 2):
+// Checks performed (Epic 1 scope + Epic 2 channel/on_event/reach additions):
 //   - Required fields: non-empty agents map; each agent has agent/command set
 //   - Enum: policy.default value
 //   - Enum: depends_on condition values
@@ -85,6 +86,11 @@ var validConditions = map[DependsOnCondition]bool{
 //     with optional /tcp|udp|sctp; host and sandbox port in 1-65535
 //   - depends_on target existence (every key references a defined agent)
 //   - DAG acyclicity (on depends_on edges)
+//   - Channel names: must match ^[a-z0-9]+(\.[a-z0-9]+)*$
+//   - Channel closed vocabulary: emits/subscribes/depends_on.channel must
+//     reference a name declared in channels[]
+//   - on_event condition requires a channel field
+//   - Single emitter per channel (v0): at most one agent emits each channel
 //
 // All errors are collected before returning; the caller sees the full list.
 func Validate(r *LoadResult) *ValidationError {
@@ -140,6 +146,10 @@ func Validate(r *LoadResult) *ValidationError {
 			if _, exists := p.Agents[depName]; !exists {
 				errorf(path, fmt.Sprintf("depends_on references undefined agent %q", depName))
 			}
+			// on_event requires a channel field
+			if dep.Condition == ConditionOnEvent && dep.Channel == "" {
+				errorf(path, "condition 'on_event' requires a 'channel' field")
+			}
 		}
 
 		// Port specs
@@ -157,6 +167,10 @@ func Validate(r *LoadResult) *ValidationError {
 			fmt.Sprintf("unknown policy default %q (valid: allow-all, balanced, deny-all)",
 				p.Defaults.Policy.Default))
 	}
+
+	// -- Channel validation --
+	channelSet := validateChannels(p, errorf)
+	validateChannelRefs(p, channelSet, agentNames, errorf)
 
 	// -- DAG acyclicity --
 	if cycle := detectCycle(p.Agents); cycle != nil {
@@ -282,4 +296,79 @@ func detectCycle(agents map[string]*Agent) []string {
 		}
 	}
 	return nil
+}
+
+// channelNameRe is the pattern a channel name must match.
+var channelNameRe = regexp.MustCompile(`^[a-z0-9]+(\.[a-z0-9]+)*$`)
+
+// validateChannels validates the top-level channels[] list:
+//   - each name must match channelNameRe
+//
+// Returns a set of valid channel names for reference-integrity checks.
+func validateChannels(p *Project, errorf func(path, msg string)) map[string]struct{} {
+	set := make(map[string]struct{}, len(p.Channels))
+	for i, ch := range p.Channels {
+		path := fmt.Sprintf("channels[%d]", i)
+		if !channelNameRe.MatchString(ch) {
+			errorf(path, fmt.Sprintf("channel name %q is invalid (must match [a-z0-9]+(\\.[a-z0-9]+)*)", ch))
+			continue
+		}
+		if _, dup := set[ch]; dup {
+			errorf(path, fmt.Sprintf("duplicate channel name %q", ch))
+			continue
+		}
+		set[ch] = struct{}{}
+	}
+	return set
+}
+
+// validateChannelRefs checks that every emits/subscribes/depends_on.channel
+// reference resolves to a declared channel, and enforces the single-emitter
+// rule (v0: at most one agent emits each channel).
+func validateChannelRefs(p *Project, channelSet map[string]struct{}, agentNames []string, errorf func(path, msg string)) {
+	// emitterOf maps channel -> agent name (first agent that emits it).
+	emitterOf := make(map[string]string)
+
+	for _, name := range agentNames {
+		agent := p.Agents[name]
+		base := "agents." + name
+
+		for i, ch := range agent.Emits {
+			path := fmt.Sprintf("%s.emits[%d]", base, i)
+			if _, ok := channelSet[ch]; !ok {
+				errorf(path, fmt.Sprintf("channel %q is not declared in channels[]", ch))
+				continue
+			}
+			// Single-emitter rule.
+			if prev, dup := emitterOf[ch]; dup {
+				errorf(path, fmt.Sprintf("channel %q already emitted by agent %q (v0: single emitter per channel)", ch, prev))
+			} else {
+				emitterOf[ch] = name
+			}
+		}
+
+		for i, ch := range agent.Subscribes {
+			path := fmt.Sprintf("%s.subscribes[%d]", base, i)
+			if _, ok := channelSet[ch]; !ok {
+				errorf(path, fmt.Sprintf("channel %q is not declared in channels[]", ch))
+			}
+		}
+
+		// depends_on.channel references.
+		depNames := make([]string, 0, len(agent.DependsOn))
+		for depName := range agent.DependsOn {
+			depNames = append(depNames, depName)
+		}
+		sort.Strings(depNames)
+		for _, depName := range depNames {
+			dep := agent.DependsOn[depName]
+			if dep.Channel == "" {
+				continue
+			}
+			path := base + ".depends_on." + depName
+			if _, ok := channelSet[dep.Channel]; !ok {
+				errorf(path, fmt.Sprintf("depends_on channel %q is not declared in channels[]", dep.Channel))
+			}
+		}
+	}
 }

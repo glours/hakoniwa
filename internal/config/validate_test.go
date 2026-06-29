@@ -187,20 +187,38 @@ func TestValidateDependsOnAllConditions(t *testing.T) {
 		config.ConditionCreated,
 		config.ConditionRunning,
 		config.ConditionCompleted,
-		config.ConditionOnEvent,
 	} {
 		p := makeProject(map[string]*config.Agent{
 			"a": {Agent: "claude"},
 			"b": {
 				Agent: "codex",
 				DependsOn: map[string]config.DependsOnEntry{
-					"a": {Condition: cond, Channel: "ch.a"},
+					"a": {Condition: cond},
 				},
 			},
 		})
 		if err := validate(p); err != nil {
 			t.Errorf("condition %q should pass validation, got: %v", cond, err)
 		}
+	}
+
+	// on_event condition requires a declared channel and an emitter.
+	p := &config.Project{
+		Name:     "test",
+		Channels: []string{"ch.a"},
+		Agents: map[string]*config.Agent{
+			"a": {Agent: "claude", Emits: []string{"ch.a"}},
+			"b": {
+				Agent: "codex",
+				DependsOn: map[string]config.DependsOnEntry{
+					"a": {Condition: config.ConditionOnEvent, Channel: "ch.a"},
+				},
+				Subscribes: []string{"ch.a"},
+			},
+		},
+	}
+	if err := validate(p); err != nil {
+		t.Errorf("on_event with declared channel should pass validation, got: %v", err)
 	}
 }
 
