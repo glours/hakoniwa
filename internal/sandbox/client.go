@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,10 +25,9 @@ func (e *NotFoundError) Error() string {
 	return fmt.Sprintf("%s: not found", e.Resource)
 }
 
-// IsNotFound returns true if err is a *NotFoundError.
+// IsNotFound returns true if err (or any wrapped error) is a *NotFoundError.
 func IsNotFound(err error) bool {
-	_, ok := err.(*NotFoundError)
-	return ok
+	return errors.As(err, new(*NotFoundError))
 }
 
 // SandboxInfo is an alias for the generated type, re-exported for callers
@@ -36,6 +36,9 @@ type SandboxInfo = sandboxapi.SandboxInfo
 
 // PublishedPort is an alias for the generated type.
 type PublishedPort = sandboxapi.PublishedPort
+
+// PortPublishRequest is an alias for the generated type.
+type PortPublishRequest = sandboxapi.PortPublishRequest
 
 // PortKey is an alias for the generated type.
 type PortKey = sandboxapi.PortKey
@@ -65,10 +68,10 @@ type Client interface {
 	ListPublishedPorts(ctx context.Context, name string) ([]PublishedPort, error)
 
 	// PublishPorts publishes the given port mappings for a sandbox.
-	PublishPorts(ctx context.Context, name string, ports []sandboxapi.PortPublishRequest) error
+	PublishPorts(ctx context.Context, name string, ports []PortPublishRequest) error
 
 	// UnpublishPorts removes the given port mappings from a sandbox.
-	UnpublishPorts(ctx context.Context, name string, keys []sandboxapi.PortKey) error
+	UnpublishPorts(ctx context.Context, name string, keys []PortKey) error
 }
 
 // DaemonClient is the live implementation of Client that talks to sandboxd
@@ -188,7 +191,7 @@ func (c *DaemonClient) DeleteSandbox(ctx context.Context, name string) error {
 	if resp.HTTPResponse.StatusCode == http.StatusNotFound {
 		return &NotFoundError{Resource: "sandbox " + name}
 	}
-	if resp.HTTPResponse.StatusCode != http.StatusNoContent && resp.HTTPResponse.StatusCode != http.StatusOK {
+	if resp.HTTPResponse.StatusCode != http.StatusOK {
 		return fmt.Errorf("deleteSandbox %q: unexpected status %d", name, resp.HTTPResponse.StatusCode)
 	}
 	return nil
@@ -211,7 +214,7 @@ func (c *DaemonClient) ListPublishedPorts(ctx context.Context, name string) ([]P
 	return *resp.JSON200, nil
 }
 
-func (c *DaemonClient) PublishPorts(ctx context.Context, name string, ports []sandboxapi.PortPublishRequest) error {
+func (c *DaemonClient) PublishPorts(ctx context.Context, name string, ports []PortPublishRequest) error {
 	resp, err := c.api.PublishPortsWithResponse(ctx, sandboxapi.SandboxName(name),
 		sandboxapi.PublishPortsJSONRequestBody(ports))
 	if err != nil {
@@ -220,13 +223,20 @@ func (c *DaemonClient) PublishPorts(ctx context.Context, name string, ports []sa
 	if resp.HTTPResponse.StatusCode == http.StatusNotFound {
 		return &NotFoundError{Resource: "sandbox " + name}
 	}
-	if resp.HTTPResponse.StatusCode != http.StatusOK && resp.HTTPResponse.StatusCode != http.StatusNoContent {
+	if resp.HTTPResponse.StatusCode == http.StatusBadRequest {
+		// 400 carries a structured ErrorResponse (e.g. port conflict).
+		if resp.JSON400 != nil && resp.JSON400.Message != "" {
+			return fmt.Errorf("publishPorts %q: %s", name, resp.JSON400.Message)
+		}
+		return fmt.Errorf("publishPorts %q: bad request (port conflict?)", name)
+	}
+	if resp.HTTPResponse.StatusCode != http.StatusOK {
 		return fmt.Errorf("publishPorts %q: unexpected status %d", name, resp.HTTPResponse.StatusCode)
 	}
 	return nil
 }
 
-func (c *DaemonClient) UnpublishPorts(ctx context.Context, name string, keys []sandboxapi.PortKey) error {
+func (c *DaemonClient) UnpublishPorts(ctx context.Context, name string, keys []PortKey) error {
 	resp, err := c.api.UnpublishPortsWithResponse(ctx, sandboxapi.SandboxName(name),
 		sandboxapi.UnpublishPortsJSONRequestBody(keys))
 	if err != nil {
@@ -235,7 +245,7 @@ func (c *DaemonClient) UnpublishPorts(ctx context.Context, name string, keys []s
 	if resp.HTTPResponse.StatusCode == http.StatusNotFound {
 		return &NotFoundError{Resource: "sandbox " + name}
 	}
-	if resp.HTTPResponse.StatusCode != http.StatusOK && resp.HTTPResponse.StatusCode != http.StatusNoContent {
+	if resp.HTTPResponse.StatusCode != http.StatusOK {
 		return fmt.Errorf("unpublishPorts %q: unexpected status %d", name, resp.HTTPResponse.StatusCode)
 	}
 	return nil
