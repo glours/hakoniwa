@@ -22,8 +22,35 @@ func makeAgents(specs map[string][]string) map[string]*config.EffectiveAgent {
 	return agents
 }
 
+func TestBuildGraphEmptyAgents(t *testing.T) {
+	g, err := orchestrator.BuildGraph(map[string]*config.EffectiveAgent{})
+	if err != nil {
+		t.Fatalf("BuildGraph(empty): %v", err)
+	}
+	if order := g.Order(); len(order) != 0 {
+		t.Errorf("expected empty order, got %v", order)
+	}
+}
+
+func TestBuildGraphDanglingDep(t *testing.T) {
+	agents := makeAgents(map[string][]string{
+		"a": {"nonexistent"},
+	})
+	_, err := orchestrator.BuildGraph(agents)
+	if err == nil {
+		t.Fatal("expected error for dangling dep, got nil")
+	}
+	unknown, ok := err.(*orchestrator.UnknownDepError)
+	if !ok {
+		t.Fatalf("expected *UnknownDepError, got %T: %v", err, err)
+	}
+	if unknown.Dep != "nonexistent" {
+		t.Errorf("UnknownDepError.Dep = %q, want nonexistent", unknown.Dep)
+	}
+}
+
+// a <- b <- c  (a must start first)
 func TestBuildGraphLinearChain(t *testing.T) {
-	// a <- b <- c  (a must start first)
 	agents := makeAgents(map[string][]string{
 		"a": nil,
 		"b": {"a"},

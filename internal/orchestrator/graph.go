@@ -14,7 +14,7 @@ import (
 type Graph struct {
 	// order is the topological ordering of agent names (dependencies first).
 	order []string
-	// edges maps agent name -> set of agent names it directly depends on.
+	// edges maps agent name -> sorted list of agent names it directly depends on.
 	edges map[string][]string
 }
 
@@ -28,23 +28,46 @@ func (e *CycleError) Error() string {
 	return fmt.Sprintf("dependency cycle detected: %s", strings.Join(e.Cycle, " -> "))
 }
 
+// UnknownDepError is returned by BuildGraph when a depends_on entry references
+// an agent name that does not exist in the agents map.
+type UnknownDepError struct {
+	Agent string
+	Dep   string
+}
+
+func (e *UnknownDepError) Error() string {
+	return fmt.Sprintf("agent %q depends on unknown agent %q", e.Agent, e.Dep)
+}
+
 // BuildGraph constructs a dependency graph from the resolved agents in a
 // project and returns it with a computed topological ordering.
 //
-// Epic-1 conditions (created, running, completed) and on_event all contribute
-// to ordering — the distinction between condition types affects the orchestrator
-// loop, not the graph topology.
+// All depends_on conditions (created, running, completed, on_event) contribute
+// to the ordering — the condition type affects the orchestrator loop, not the
+// graph topology.
 //
-// Declaration order within the YAML is used as a tiebreaker: agents are sorted
-// by name to give a deterministic, stable topological order.
+// Agents with no mutual dependencies are ordered alphabetically (lexicographic
+// name sort) to give a deterministic, stable result.
 //
-// Returns CycleError if the depends_on graph is cyclic.
+// Returns UnknownDepError if any depends_on entry references an undefined agent,
+// or CycleError if the depends_on graph is cyclic.
 func BuildGraph(agents map[string]*config.EffectiveAgent) (*Graph, error) {
-	// Build adjacency: agent -> list of agents it depends on.
+	// Build adjacency: agent -> sorted list of agents it depends on.
+	// Validate that every dependency target exists.
 	edges := make(map[string][]string, len(agents))
-	for name, ea := range agents {
+	agentNames := make([]string, 0, len(agents))
+	for name := range agents {
+		agentNames = append(agentNames, name)
+	}
+	sort.Strings(agentNames)
+
+	for _, name := range agentNames {
+		ea := agents[name]
 		deps := make([]string, 0, len(ea.DependsOn))
 		for dep := range ea.DependsOn {
+			if _, exists := agents[dep]; !exists {
+				return nil, &UnknownDepError{Agent: name, Dep: dep}
+			}
 			deps = append(deps, dep)
 		}
 		sort.Strings(deps)
@@ -56,10 +79,7 @@ func BuildGraph(agents map[string]*config.EffectiveAgent) (*Graph, error) {
 	inDegree := make(map[string]int, len(agents))
 	// reverse-edges: dep -> list of agents that depend on dep.
 	revEdges := make(map[string][]string, len(agents))
-	for name := range agents {
-		if _, ok := inDegree[name]; !ok {
-			inDegree[name] = 0
-		}
+	for _, name := range agentNames {
 		for _, dep := range edges[name] {
 			inDegree[name]++
 			revEdges[dep] = append(revEdges[dep], name)
@@ -67,14 +87,14 @@ func BuildGraph(agents map[string]*config.EffectiveAgent) (*Graph, error) {
 	}
 
 	// Seed the queue with all agents that have no dependencies.
-	// Sort for determinism.
+	// Sorted for determinism.
 	queue := make([]string, 0, len(agents))
-	for name := range inDegree {
+	for _, name := range agentNames {
 		if inDegree[name] == 0 {
 			queue = append(queue, name)
 		}
 	}
-	sort.Strings(queue)
+	// agentNames is already sorted, so queue is already sorted here.
 
 	order := make([]string, 0, len(agents))
 	for len(queue) > 0 {
@@ -93,7 +113,7 @@ func BuildGraph(agents map[string]*config.EffectiveAgent) (*Graph, error) {
 		}
 		sort.Strings(newlyReady)
 		queue = append(queue, newlyReady...)
-		sort.Strings(queue) // keep queue stable
+		sort.Strings(queue) // keep queue stable after merge
 	}
 
 	// If any agent was not placed, a cycle exists.
@@ -125,7 +145,8 @@ func (g *Graph) DependsOn(name string) []string {
 }
 
 // findCycle finds and returns a cycle in the dependency graph using DFS.
-// The edges map must contain only the subset of agents involved in the cycle.
+// It is called only after Kahn's algorithm has determined that a cycle exists,
+// so it is guaranteed to find one.
 func findCycle(edges map[string][]string) []string {
 	const (
 		unvisited = 0
@@ -150,7 +171,7 @@ func findCycle(edges map[string][]string) []string {
 						return cycle
 					}
 				}
-				return []string{dep, dep}
+				return []string{dep, dep} // fallback (should not happen)
 			case unvisited:
 				if cycle := dfs(dep); cycle != nil {
 					return cycle
