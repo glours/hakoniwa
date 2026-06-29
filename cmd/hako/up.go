@@ -53,6 +53,9 @@ func runUp(cmd *cobra.Command, file string) error {
 	if err != nil {
 		return err
 	}
+	// Wire session driver and file stager for the event-driven executor.
+	orch.Driver = client
+	orch.Stager = client
 
 	if err := orch.Up(cmd.Context(), lr.Project); err != nil {
 		fmt.Fprintf(os.Stderr, "hako up: %v\n", err)

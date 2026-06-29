@@ -23,6 +23,12 @@ type Orchestrator struct {
 	Out          io.Writer
 	PollInterval time.Duration
 	PollTimeout  time.Duration
+
+	// Driver and Stager are optional — set by the CLI wiring when session
+	// driving is enabled (Task 2.6). When nil, Up skips session driving
+	// (backward-compatible with infrastructure-only tests).
+	Driver sandbox.SessionDriver
+	Stager sandbox.FileStager
 }
 
 // NewOrchestrator creates an Orchestrator with sensible poll defaults.

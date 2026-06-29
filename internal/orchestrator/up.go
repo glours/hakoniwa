@@ -13,13 +13,12 @@ import (
 // Up creates, configures, and starts all agents defined in the project file,
 // walking them in topological dependency order.
 //
+// When Driver and Stager are set on the Orchestrator, Up also drives each
+// agent's session after starting its sandbox, fires emitted channels, and
+// gates subscribers until their on_event channels have fired (fan-out/fan-in).
+//
 // The operation is fully idempotent: re-running Up on an already-running
 // project recreates nothing and skips any port bindings that already exist.
-//
-// Sequential topo-order processing naturally honours all depends_on gates
-// (created and running): each agent is fully started before its dependents
-// are processed, so both gate conditions are satisfied at the time dependents
-// begin.
 func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 	agents := config.ResolveAgents(project)
 
@@ -28,14 +27,59 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 		return fmt.Errorf("build dependency graph: %w", err)
 	}
 
-	fmt.Fprintf(o.Out, "Ensuring daemon is running…\n")
+	fmt.Fprintf(o.Out, "Ensuring daemon is running\u2026\n")
 	if err := o.Sbx.EnsureDaemon(ctx); err != nil {
 		return fmt.Errorf("ensure daemon: %w", err)
 	}
 
+	// Build the channel registry from the project's declared channels.
+	// emitterOf maps channel name -> agent key (from each agent's Emits list).
+	emitterOf := make(map[string]string, len(project.Channels))
+	for _, name := range graph.Order() {
+		for _, ch := range agents[name].Emits {
+			emitterOf[ch] = name
+		}
+	}
+	reg := NewChannelRegistry(project.Channels, emitterOf)
+
+	// Build a GateWaiter when session driving is enabled.
+	var gw *GateWaiter
+	if o.Driver != nil {
+		gw = &GateWaiter{
+			Registry: reg,
+			Stager:   o.Stager,
+			Out:      o.Out,
+		}
+	}
+
 	for _, agentName := range graph.Order() {
-		if err := o.ensureAgent(ctx, agentName, agents[agentName]); err != nil {
+		ea := agents[agentName]
+
+		// Wait for on_event gates (session mode). In topo order the emitter
+		// always precedes the subscriber, so WaitGates normally returns
+		// immediately (channel already fired). The guard is still needed for
+		// robustness and for the fan-in case.
+		if gw != nil {
+			if err := gw.WaitGates(ctx, agentName, ea); err != nil {
+				return err
+			}
+		}
+
+		if err := o.ensureAgent(ctx, agentName, ea); err != nil {
 			return err
+		}
+
+		// Drive the agent session (event-driven mode only).
+		if o.Driver != nil {
+			sbxName := o.SandboxName(agentName)
+			if gw != nil {
+				if err := gw.StageSubscribed(ctx, agentName, sbxName, ea); err != nil {
+					return err
+				}
+			}
+			if err := o.driveSession(ctx, agentName, ea, reg); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -43,11 +87,35 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 	return nil
 }
 
+// driveSession opens an agent session, drives it to completion, and fires
+// any channels the agent emits.
+func (o *Orchestrator) driveSession(
+	ctx context.Context,
+	agentName string,
+	ea *config.EffectiveAgent,
+	reg *ChannelRegistry,
+) error {
+	sbxName := o.SandboxName(agentName)
+	fmt.Fprintf(o.Out, "[%s] attaching agent session on %s\n", agentName, sbxName)
+
+	session, err := o.Driver.AttachAgentSession(ctx, sbxName, sandboxapi.AgentSessionRequest{})
+	if err != nil {
+		return fmt.Errorf("[%s] attach session: %w", agentName, err)
+	}
+
+	det := &EmitDetector{
+		Registry: reg,
+		Stager:   o.Stager,
+		Out:      o.Out,
+	}
+	return det.DriveAndEmit(ctx, agentName, sbxName, ea, session)
+}
+
 // ensureAgent find-or-creates, publishes ports, starts, and waits for a
 // single agent sandbox to reach the running state.
 func (o *Orchestrator) ensureAgent(ctx context.Context, agentName string, ea *config.EffectiveAgent) error {
 	sbxName := o.SandboxName(agentName)
-	fmt.Fprintf(o.Out, "[%s] ensuring sandbox %s…\n", agentName, sbxName)
+	fmt.Fprintf(o.Out, "[%s] ensuring sandbox %s\u2026\n", agentName, sbxName)
 
 	// 1. Find or create — inspect first; only call sbx create when absent.
 	_, inspErr := o.Client.InspectSandbox(ctx, sbxName)
@@ -84,12 +152,12 @@ func (o *Orchestrator) ensureAgent(ctx context.Context, agentName string, ea *co
 	}
 
 	// 4. Poll until status == running.
-	fmt.Fprintf(o.Out, "[%s] waiting for running…\n", agentName)
+	fmt.Fprintf(o.Out, "[%s] waiting for running\u2026\n", agentName)
 	if err := o.waitRunning(ctx, agentName, sbxName); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(o.Out, "[%s] running ✓\n", agentName)
+	fmt.Fprintf(o.Out, "[%s] running \u2713\n", agentName)
 	return nil
 }
 
