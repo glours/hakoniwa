@@ -7,12 +7,13 @@ output-options:
   # Streaming and HTTP-upgrade endpoints are excluded from generated client
   # emission (same pattern as docker/sandboxes upstream). These operations
   # need raw net.Conn / streaming io.Reader access that io.ReadAll defeats.
-  # They are implemented by hand in streaming.go when Epic-2 needs them.
+  # They are implemented by hand in the parent package when needed.
+  # Note: attachAgentSession was introduced after v0.34.0 and is not present
+  # in this spec version (OpenAPI 0.16.0 from docker/sandboxes v0.34.0).
   exclude-operation-ids:
     - pullImage
     - exportImage
     - getFile
     - putFile
     - attachExec
-    - attachAgentSession
     - sessionHold
