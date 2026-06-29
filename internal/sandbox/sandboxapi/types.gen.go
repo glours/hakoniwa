@@ -20,16 +20,33 @@ const (
 
 // Defines values for LogLevelRequestLevel.
 const (
-	Debug LogLevelRequestLevel = "debug"
-	Error LogLevelRequestLevel = "error"
-	Info  LogLevelRequestLevel = "info"
-	Warn  LogLevelRequestLevel = "warn"
+	LogLevelRequestLevelDebug LogLevelRequestLevel = "debug"
+	LogLevelRequestLevelError LogLevelRequestLevel = "error"
+	LogLevelRequestLevelInfo  LogLevelRequestLevel = "info"
+	LogLevelRequestLevelWarn  LogLevelRequestLevel = "warn"
+)
+
+// Defines values for MountAddRequestOptions.
+const (
+	Ro MountAddRequestOptions = "ro"
+	Rw MountAddRequestOptions = "rw"
 )
 
 // Defines values for NetworkPolicyDebugScope.
 const (
 	Global  NetworkPolicyDebugScope = "global"
 	Sandbox NetworkPolicyDebugScope = "sandbox"
+)
+
+// Defines values for PolicyCheckRequestType.
+const (
+	Network PolicyCheckRequestType = "network"
+)
+
+// Defines values for PolicyGovernanceStatusLastSyncedStatus.
+const (
+	PolicyGovernanceStatusLastSyncedStatusOk   PolicyGovernanceStatusLastSyncedStatus = "ok"
+	PolicyGovernanceStatusLastSyncedStatusWarn PolicyGovernanceStatusLastSyncedStatus = "warn"
 )
 
 // Defines values for PolicyRuleDecision.
@@ -81,8 +98,8 @@ const (
 
 // Defines values for PolicyRulesListResponseLastSyncedStatus.
 const (
-	SyncOk   PolicyRulesListResponseLastSyncedStatus = "sync-ok"
-	SyncWarn PolicyRulesListResponseLastSyncedStatus = "sync-warn"
+	Ok   PolicyRulesListResponseLastSyncedStatus = "ok"
+	Warn PolicyRulesListResponseLastSyncedStatus = "warn"
 )
 
 // Defines values for PolicySetupRequestPreset.
@@ -186,6 +203,34 @@ type AddKitRequest struct {
 	KitArtifact map[string]interface{} `json:"kit_artifact"`
 }
 
+// AgentSessionRequest Body of POST /sandbox/{name}/agent/session. Every field is optional —
+// an empty body opens a default agent session. `args` are forwarded to
+// the sandbox's agent start script as positional parameters;
+// `start_command` is consulted only when the sandbox predates the
+// baked-in start script and the daemon must heal-write it.
+type AgentSessionRequest struct {
+	// Args Arguments forwarded to the agent start script as "$@" (e.g. a
+	// prompt, or a sub-command like `agents`). Omit for a default
+	// session.
+	Args *[]string `json:"args,omitempty"`
+
+	// Env Additional environment variables for the agent session, as a map
+	// of name → value. Same shape as ExecRequest.env.
+	Env *map[string]string `json:"env,omitempty"`
+
+	// StartCommand The agent launch command (binary plus its implicit run options)
+	// used to heal-write the start script when it is missing: the first
+	// element is the binary, the rest are baked as the default run
+	// options. Ignored when the script already exists.
+	StartCommand *[]string `json:"start_command,omitempty"`
+
+	// Tty Allocate a pseudo-TTY (same semantics as ExecRequest.tty).
+	Tty *bool `json:"tty,omitempty"`
+
+	// WorkingDir Working directory inside the container.
+	WorkingDir *string `json:"working_dir,omitempty"`
+}
+
 // CreatedRule defines model for CreatedRule.
 type CreatedRule struct {
 	Resource string `json:"resource"`
@@ -219,14 +264,37 @@ type CustomSecretDebugEntry struct {
 
 // CustomSecretValue defines model for CustomSecretValue.
 type CustomSecretValue struct {
+	// Backend Resolver backend for ref custom secrets.
+	Backend *string `json:"backend,omitempty"`
+
 	// EnvName Name of the environment variable the sandbox sees.
 	EnvName string `json:"env_name"`
+
+	// Kind Optional dynamic resolution kind. Empty/literal means `value`
+	// is the real secret; `ref` and `command` resolve `source` before
+	// replacement.
+	Kind *string `json:"kind,omitempty"`
+
+	// Refresh Dynamic resolution policy: empty is treated as `on-demand` for
+	// legacy records, `on-demand` resolves every matched request, or a
+	// duration string such as `55m`.
+	Refresh *string `json:"refresh,omitempty"`
+
+	// ResolverEnv Provider-owned environment captured when a ref custom secret is
+	// stored, used later by daemon-side built-in reference resolvers.
+	// Clients must send only allowlisted resolver selectors/config values,
+	// such as AWS_PROFILE or OP_ACCOUNT, never arbitrary process env or raw
+	// credential variables.
+	ResolverEnv *map[string]string `json:"resolver_env,omitempty"`
 
 	// Sentinel Daemon-side identifier the proxy looks for in request bodies
 	// and headers; replaced with the corresponding `value` before
 	// the request leaves the host. Non-empty and unique per
 	// request body.
 	Sentinel string `json:"sentinel"`
+
+	// Source Reference URI or shell command for dynamic custom secrets.
+	Source *string `json:"source,omitempty"`
 
 	// Target Deprecated — use `targets` instead. Retained for backward
 	// compatibility with older clients. The proxy treats a non-empty
@@ -317,6 +385,11 @@ type DebugStateResponse struct {
 
 // DockerContainerDebug defines model for DockerContainerDebug.
 type DockerContainerDebug struct {
+	// Created Container creation time (RFC 3339), omitted when Docker does not report it.
+	Created *time.Time `json:"created,omitempty"`
+
+	// Id Docker container ID.
+	Id   string `json:"id"`
 	Name string `json:"name"`
 
 	// Tracked Whether sandboxd has a runtime tracking this container.
@@ -325,8 +398,13 @@ type DockerContainerDebug struct {
 
 // DockerNetworkDebug defines model for DockerNetworkDebug.
 type DockerNetworkDebug struct {
-	Driver string `json:"driver"`
-	Name   string `json:"name"`
+	// Created Network creation time (RFC 3339), omitted when Docker does not report it.
+	Created *time.Time `json:"created,omitempty"`
+	Driver  string     `json:"driver"`
+
+	// Id Docker network ID.
+	Id   string `json:"id"`
+	Name string `json:"name"`
 
 	// SandboxManaged Whether this is a sandbox-managed (gvisor-driver) network.
 	SandboxManaged bool `json:"sandbox_managed"`
@@ -536,10 +614,158 @@ type LogLevelRequest struct {
 // LogLevelRequestLevel Threshold to apply to the target category.
 type LogLevelRequestLevel string
 
+// McpGatewayAddServerRequest defines model for McpGatewayAddServerRequest.
+type McpGatewayAddServerRequest struct {
+	// Server Name of a server already registered in the MCP store.
+	Server string `json:"server"`
+}
+
+// McpGatewayAddServerResponse defines model for McpGatewayAddServerResponse.
+type McpGatewayAddServerResponse struct {
+	Sandbox *string `json:"sandbox,omitempty"`
+	Server  *string `json:"server,omitempty"`
+}
+
+// McpGatewayStartRequest defines model for McpGatewayStartRequest.
+type McpGatewayStartRequest struct {
+	// Servers Servers to pre-connect. Honoured only when `static` is true;
+	// ignored (and conventionally empty) in dynamic mode.
+	Servers *[]string `json:"servers,omitempty"`
+
+	// Static When true, pre-load exactly `servers`, disable dynamic
+	// discovery, and suppress the discovery tools. When false (the
+	// default), nothing is pre-loaded, the full catalog stays
+	// searchable, and the discovery tools remain exposed.
+	Static *bool `json:"static,omitempty"`
+}
+
+// McpGatewayStartResponse defines model for McpGatewayStartResponse.
+type McpGatewayStartResponse struct {
+	InlineServers *[]string `json:"inline_servers,omitempty"`
+
+	// Port Local TCP port the gateway is listening on.
+	Port int `json:"port"`
+
+	// Reused True when the daemon returned an already-running gateway for
+	// the sandbox rather than provisioning a new one.
+	Reused *bool `json:"reused,omitempty"`
+
+	// Servers Servers connected at the gateway.
+	Servers *[]string `json:"servers,omitempty"`
+
+	// Skipped Pre-connect targets that were not connected.
+	Skipped *[]McpSkippedServer `json:"skipped,omitempty"`
+
+	// Url Stable per-sandbox gateway URL baked into the container
+	// environment. Invariant across daemon restarts that re-bind
+	// the gateway on a fresh ephemeral port.
+	Url string `json:"url"`
+}
+
+// McpGatewayStatusResponse defines model for McpGatewayStatusResponse.
+type McpGatewayStatusResponse struct {
+	Port int    `json:"port"`
+	Url  string `json:"url"`
+}
+
+// McpRegistrationCheckRequest defines model for McpRegistrationCheckRequest.
+type McpRegistrationCheckRequest struct {
+	// Spec Resolved MCP server spec to evaluate. Modeled as a free-form
+	// object so this schema does not need to track the MCP runtime's
+	// server-spec struct evolution.
+	Spec map[string]interface{} `json:"spec"`
+}
+
+// McpRegistrationCheckResponse defines model for McpRegistrationCheckResponse.
+type McpRegistrationCheckResponse struct {
+	// Allowed True when the registration is permitted by policy.
+	Allowed bool `json:"allowed"`
+
+	// Name Name of the evaluated server, echoed for convenience.
+	Name *string `json:"name,omitempty"`
+
+	// Reason Human-readable explanation when `allowed` is false. Empty when
+	// the registration is allowed.
+	Reason *string `json:"reason,omitempty"`
+}
+
+// McpSkippedServer defines model for McpSkippedServer.
+type McpSkippedServer struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
 // MessageResponse defines model for MessageResponse.
 type MessageResponse struct {
 	// Message Human-readable message describing the operation outcome.
 	Message string `json:"message"`
+}
+
+// MountAddRequest Request body for `POST /sandbox/{name}/mounts`. Adds `host_path`
+// to the policy-enabled "host" virtiofs share's allowlist for the
+// named sandbox so it becomes visible at
+// `/mnt/host/<canonical-host-path>` inside the sandbox VM.
+//
+// When `container_target` is set, the daemon additionally performs
+// a real bind mount inside the running container's mount namespace
+// at `container_target` pointing at the in-VM source — the dynamic
+// counterpart of `docker run -v <host_path>:<container_target>`.
+// Idempotent: re-adding an already-allowed path or re-binding the
+// same target is a no-op success.
+type MountAddRequest struct {
+	// ContainerTarget Optional absolute path inside the sandbox container at which
+	// to bind-mount `host_path`. When omitted, the path is only
+	// added to the allowlist; callers reach it under `/mnt/host/`
+	// followed by the guest-form host path (on Windows the drive
+	// letter becomes a child, e.g. `/mnt/host/c/Users/me/data`).
+	ContainerTarget *string `json:"container_target,omitempty"`
+
+	// HostPath Absolute NATIVE host path to expose, in the daemon host's own
+	// form (`/srv/data` on Linux/macOS, `C:\Users\me\data` on a native
+	// Windows daemon). The daemon resolves and allowlists it natively
+	// and computes the guest-side form itself; do NOT pre-translate to
+	// a guest `/c/...` path. The daemon does NOT stat the path —
+	// verifying existence and canonicalizing user input (resolving
+	// cwd-relative inputs, cleaning `./..` segments) is the caller's
+	// responsibility. The sbx CLI runs `filepath.Abs` + `os.Stat`
+	// before submission for `sbx mount`; other HTTP clients must do
+	// the same. Symlinks are resolved during allowlist storage.
+	HostPath string `json:"host_path"`
+
+	// Options Optional mount option. `ro` is enforced at the kernel mount
+	// layer via `MOUNT_ATTR_RDONLY` (set on the open_tree clone
+	// before move_mount), so guest writes through the bind return
+	// EROFS. `rw` is the default. At most one option may be set.
+	// Requires `container_target` — passing `options` without a
+	// target is a 400, because there is no bind to make read-only
+	// and silently accepting it would let callers think they got
+	// `ro` semantics they did not actually get.
+	Options *[]MountAddRequestOptions `json:"options,omitempty"`
+}
+
+// MountAddRequestOptions defines model for MountAddRequest.Options.
+type MountAddRequestOptions string
+
+// MountRemoveRequest Request body for `DELETE /sandbox/{name}/mounts`. Removes
+// `host_path` from the policy-enabled "host" share's allowlist for
+// the named sandbox. Idempotent — removing a path that was never
+// allowed succeeds.
+//
+// When `container_target` is set, the daemon also umounts the bind
+// at that path inside the sandbox container before mutating the
+// allowlist. When `container_target` is omitted, ONLY the allowlist
+// entry is dropped: `docker run -v` has no host-path-only umount
+// semantics, and using `host_path` as an umount target would
+// attempt to unmount an arbitrary user-controlled path inside the
+// container.
+type MountRemoveRequest struct {
+	// ContainerTarget Optional absolute path inside the sandbox container of the
+	// bind to umount. Must match a target previously passed to
+	// `POST /sandbox/{name}/mounts`.
+	ContainerTarget *string `json:"container_target,omitempty"`
+
+	// HostPath Absolute host path to revoke.
+	HostPath string `json:"host_path"`
 }
 
 // NetworkLogEntry defines model for NetworkLogEntry.
@@ -584,25 +810,122 @@ type OAuthDebugInfo struct {
 	Service *string `json:"service,omitempty"`
 }
 
+// PolicyCheckRequest defines model for PolicyCheckRequest.
+type PolicyCheckRequest struct {
+	// SandboxId Scope the check to a sandbox's policy context. Empty /
+	// omitted for the global policy.
+	SandboxId *string `json:"sandbox_id,omitempty"`
+
+	// Target Target to evaluate. The daemon accepts bare hosts,
+	// host:port values, IP literals, and http(s) URLs.
+	Target string `json:"target"`
+
+	// Type Resource type to evaluate. Only "network" is supported today.
+	Type PolicyCheckRequestType `json:"type"`
+}
+
+// PolicyCheckRequestType Resource type to evaluate. Only "network" is supported today.
+type PolicyCheckRequestType string
+
+// PolicyCheckResponse defines model for PolicyCheckResponse.
+type PolicyCheckResponse struct {
+	Action        string                 `json:"action"`
+	Allowed       bool                   `json:"allowed"`
+	Context       string                 `json:"context"`
+	DenyKind      *string                `json:"deny_kind,omitempty"`
+	Governance    PolicyGovernanceStatus `json:"governance"`
+	Origin        *string                `json:"origin,omitempty"`
+	Reason        *string                `json:"reason,omitempty"`
+	ResourceType  string                 `json:"resource_type"`
+	ResourceValue string                 `json:"resource_value"`
+	Rule          *string                `json:"rule,omitempty"`
+	Target        string                 `json:"target"`
+	Type          string                 `json:"type"`
+}
+
+// PolicyGovernanceStatus defines model for PolicyGovernanceStatus.
+type PolicyGovernanceStatus struct {
+	// Active True when corporate governance is active, or when metadata
+	// lookup indicates governance exists but organization details
+	// are unavailable.
+	Active bool `json:"active"`
+
+	// LastSyncedMessage Plain-text sync-status line formatted server-side.
+	LastSyncedMessage *string                                 `json:"last_synced_message,omitempty"`
+	LastSyncedStatus  *PolicyGovernanceStatusLastSyncedStatus `json:"last_synced_status,omitempty"`
+
+	// Organization Display name of the governing organization when known.
+	Organization *string `json:"organization,omitempty"`
+
+	// OrganizationUnavailable True when organization lookup failed. Clients should render
+	// this as an unknown governing organization, not local-only.
+	OrganizationUnavailable *bool `json:"organization_unavailable,omitempty"`
+}
+
+// PolicyGovernanceStatusLastSyncedStatus defines model for PolicyGovernanceStatus.LastSyncedStatus.
+type PolicyGovernanceStatusLastSyncedStatus string
+
+// PolicyProfilesListResponse defines model for PolicyProfilesListResponse.
+type PolicyProfilesListResponse struct {
+	// Profiles Names of every governance profile defined by the active
+	// policy set. Empty when profiles are not active.
+	Profiles []string `json:"profiles"`
+}
+
 // PolicyRule defines model for PolicyRule.
 type PolicyRule struct {
-	Decision PolicyRuleDecision `json:"decision"`
-	Id       string             `json:"id"`
-	Name     *string            `json:"name,omitempty"`
+	// AppliesTo Which sandboxes this active rule currently applies to. Values are
+	// "all", empty when no sandbox currently matches, or a
+	// comma-separated list of "sandbox:<sandbox_id>" entries.
+	AppliesTo *string            `json:"applies_to,omitempty"`
+	Decision  PolicyRuleDecision `json:"decision"`
+
+	// Editable Whether clients should offer mutation actions for this rule.
+	// False for system-managed rules (remote, mandatory, etc.).
+	Editable bool `json:"editable"`
+
+	// Id Unique identifier for this rule.
+	Id string `json:"id"`
+
+	// Name Optional human-readable name (e.g. "default-allow-all",
+	// "kit:claude-myproject").
+	Name *string `json:"name,omitempty"`
 
 	// Origin Source the rule was loaded from:
 	// - "local": configured locally on this machine.
 	// - "remote": pushed from a centrally-managed policy source.
 	// - "scoped": auto-attached to a single sandbox at create time.
-	Origin       *PolicyRuleOrigin `json:"origin,omitempty"`
-	Reason       *string           `json:"reason,omitempty"`
-	ResourceType string            `json:"resource_type"`
-	Resources    []string          `json:"resources"`
+	Origin *PolicyRuleOrigin `json:"origin,omitempty"`
 
-	// SandboxName Sandbox this rule is scoped to (matches SandboxInfo.name).
-	// Omitted for global rules.
-	SandboxName *string           `json:"sandbox_name,omitempty"`
-	Status      *PolicyRuleStatus `json:"status,omitempty"`
+	// PolicyId Unique identifier of the policy containing this rule.
+	PolicyId *string `json:"policy_id,omitempty"`
+
+	// PolicyName User-facing name of the policy containing this rule.
+	PolicyName *string `json:"policy_name,omitempty"`
+
+	// Profiles Governance profiles where the containing policy applies. Empty
+	// means the policy applies regardless of profile.
+	Profiles *[]string `json:"profiles,omitempty"`
+
+	// Reason Human-readable explanation of why this rule exists. Optional.
+	Reason *string `json:"reason,omitempty"`
+
+	// ResourceType Resource type this rule applies to (e.g. "network", "filesystem:read").
+	ResourceType string `json:"resource_type"`
+
+	// Resources Resource values (e.g. domains, CIDRs).
+	Resources []string `json:"resources"`
+
+	// SandboxId Sandbox a scoped rule applies to. Empty for global and
+	// remote rules.
+	SandboxId *string `json:"sandbox_id,omitempty"`
+
+	// Scope Where the containing policy applies — e.g. "global" or
+	// "sandbox:<sandbox_id>".
+	Scope *string `json:"scope,omitempty"`
+
+	// Status Whether the rule participates in authorization right now.
+	Status *PolicyRuleStatus `json:"status,omitempty"`
 }
 
 // PolicyRuleDecision defines model for PolicyRule.Decision.
@@ -614,7 +937,7 @@ type PolicyRuleDecision string
 // - "scoped": auto-attached to a single sandbox at create time.
 type PolicyRuleOrigin string
 
-// PolicyRuleStatus defines model for PolicyRule.Status.
+// PolicyRuleStatus Whether the rule participates in authorization right now.
 type PolicyRuleStatus string
 
 // PolicyRuleAction A single action against the policy rule set. The `action` field
@@ -629,8 +952,9 @@ type PolicyRuleActionAllow struct {
 	Action    PolicyRuleActionAllowAction `json:"action"`
 	Resources []string                    `json:"resources"`
 
-	// SandboxName Scope this action to a specific sandbox (matches SandboxInfo.name). Omitted for global rules.
-	SandboxName *string `json:"sandbox_name,omitempty"`
+	// SandboxId Scope this action to a specific sandbox. Empty / omitted for
+	// global rules.
+	SandboxId *string `json:"sandbox_id,omitempty"`
 }
 
 // PolicyRuleActionAllowAction defines model for PolicyRuleActionAllow.Action.
@@ -641,8 +965,9 @@ type PolicyRuleActionDeny struct {
 	Action    PolicyRuleActionDenyAction `json:"action"`
 	Resources []string                   `json:"resources"`
 
-	// SandboxName Scope this action to a specific sandbox (matches SandboxInfo.name). Omitted for global rules.
-	SandboxName *string `json:"sandbox_name,omitempty"`
+	// SandboxId Scope this action to a specific sandbox. Empty / omitted for
+	// global rules.
+	SandboxId *string `json:"sandbox_id,omitempty"`
 }
 
 // PolicyRuleActionDenyAction defines model for PolicyRuleActionDeny.Action.
@@ -655,8 +980,9 @@ type PolicyRuleActionRemoveID struct {
 	// Id Rule ID to remove.
 	Id string `json:"id"`
 
-	// SandboxName Scope this action to a specific sandbox (matches SandboxInfo.name). Omitted for global rules.
-	SandboxName *string `json:"sandbox_name,omitempty"`
+	// SandboxId Scope this action to a specific sandbox. Empty / omitted for
+	// global rules.
+	SandboxId *string `json:"sandbox_id,omitempty"`
 }
 
 // PolicyRuleActionRemoveIDAction defines model for PolicyRuleActionRemoveID.Action.
@@ -667,8 +993,9 @@ type PolicyRuleActionRemoveResource struct {
 	Action    PolicyRuleActionRemoveResourceAction `json:"action"`
 	Resources []string                             `json:"resources"`
 
-	// SandboxName Scope this action to a specific sandbox (matches SandboxInfo.name). Omitted for global rules.
-	SandboxName *string `json:"sandbox_name,omitempty"`
+	// SandboxId Scope this action to a specific sandbox. Empty / omitted for
+	// global rules.
+	SandboxId *string `json:"sandbox_id,omitempty"`
 }
 
 // PolicyRuleActionRemoveResourceAction defines model for PolicyRuleActionRemoveResource.Action.
@@ -686,8 +1013,9 @@ type PolicyRuleResult struct {
 	Id        *string                `json:"id,omitempty"`
 	Resources *[]string              `json:"resources,omitempty"`
 
-	// SandboxName Sandbox this action was scoped to (matches SandboxInfo.name). Omitted for global rules.
-	SandboxName *string `json:"sandbox_name,omitempty"`
+	// SandboxId Sandbox this action was scoped to. Empty / omitted for
+	// global rules.
+	SandboxId *string `json:"sandbox_id,omitempty"`
 }
 
 // PolicyRuleResultAction Echoes the action that produced this result — same set as
@@ -697,14 +1025,29 @@ type PolicyRuleResultAction string
 
 // PolicyRulesListResponse defines model for PolicyRulesListResponse.
 type PolicyRulesListResponse struct {
-	LastSyncedMessage       *string                                  `json:"last_synced_message,omitempty"`
-	LastSyncedStatus        *PolicyRulesListResponseLastSyncedStatus `json:"last_synced_status,omitempty"`
-	Organization            *string                                  `json:"organization,omitempty"`
-	OrganizationUnavailable *bool                                    `json:"organization_unavailable,omitempty"`
-	Rules                   []PolicyRule                             `json:"rules"`
+	// LastSyncedMessage Plain-text sync-status line formatted server-side
+	// (e.g. "[OK] last synced 09:21:42"). Populated only when
+	// remote governance is in play; empty for local-only setups.
+	LastSyncedMessage *string `json:"last_synced_message,omitempty"`
+
+	// LastSyncedStatus Structured severity for last_synced_message. Populated only
+	// when remote governance is in play.
+	LastSyncedStatus *PolicyRulesListResponseLastSyncedStatus `json:"last_synced_status,omitempty"`
+	Organization     *string                                  `json:"organization,omitempty"`
+
+	// OrganizationUnavailable True when the active organization lookup failed but the local
+	// rule set was returned successfully. Clients should treat the
+	// organization as unknown rather than unset.
+	OrganizationUnavailable *bool `json:"organization_unavailable,omitempty"`
+
+	// Profiles All available governance profiles. Empty means profiles are
+	// not active for this policy set.
+	Profiles *[]string    `json:"profiles,omitempty"`
+	Rules    []PolicyRule `json:"rules"`
 }
 
-// PolicyRulesListResponseLastSyncedStatus defines model for PolicyRulesListResponse.LastSyncedStatus.
+// PolicyRulesListResponseLastSyncedStatus Structured severity for last_synced_message. Populated only
+// when remote governance is in play.
 type PolicyRulesListResponseLastSyncedStatus string
 
 // PolicyRulesRequest defines model for PolicyRulesRequest.
@@ -859,27 +1202,6 @@ type PublishedPort struct {
 // generated clients can exhaustively switch on protocol values
 // from either side of the wire.
 type PublishedPortProtocol string
-
-// RegistryCredential Per-sandbox registry credential, used by the daemon to materialize a
-// Docker `~/.docker/config.json` inside the sandbox so dockerd-in-DinD
-// can authenticate to private registries (the host network proxy is
-// not on that path). The client builds this list from its own
-// credential store — sandbox-scoped binds win on hostname clash,
-// the "all sandboxes" bucket fills the rest, host-only ("_") scope
-// is excluded.
-type RegistryCredential struct {
-	// Hostname Registry hostname (e.g. "ghcr.io", "registry.gitlab.com").
-	Hostname string `json:"hostname"`
-
-	// Secret Password or token paired with `username`.
-	Secret string `json:"secret"`
-
-	// Username Username paired with `secret` for HTTP Basic. The client
-	// substitutes `x-access-token` for empty / `<token>` placeholders
-	// before shipping, so the daemon does not have to re-derive the
-	// convention.
-	Username string `json:"username"`
-}
 
 // ResetResponse defines model for ResetResponse.
 type ResetResponse struct {
@@ -1065,17 +1387,6 @@ type SandboxCreateRequest struct {
 	// - "missing": skip if image exists locally
 	// - "never": fail if image not local
 	PullPolicy *SandboxCreateRequestPullPolicy `json:"pull_policy,omitempty"`
-
-	// RegistryCredentials Registry credentials the daemon must inject as
-	// `/home/agent/.docker/config.json` inside the sandbox at mode
-	// 0600, so `docker pull <private-host>/...` from inside the
-	// sandbox can authenticate. The CLI builds the list from its
-	// credential store, merging the per-sandbox bucket
-	// (higher priority on hostname clash) with the
-	// `AllSandboxesRegistryScope` bucket and excluding host-only
-	// (`"_"` scope) credentials. Empty means no config.json is
-	// written.
-	RegistryCredentials *[]RegistryCredential `json:"registry_credentials,omitempty"`
 
 	// SecretsScope Scope for credential store lookups
 	SecretsScope *string `json:"secrets_scope,omitempty"`
@@ -1521,6 +1832,13 @@ type RemoveImageParams struct {
 type ListNetworkPolicyRulesParams struct {
 	// Sandbox Filter to rules scoped to this sandbox (plus global rules)
 	Sandbox *string `form:"sandbox,omitempty" json:"sandbox,omitempty"`
+
+	// Type Filter to rules of a specific resource type. Accepted values
+	// are `all`, `network`, `filesystem`, `filesystem:read`, and
+	// `filesystem:write`. Omitting the parameter returns network
+	// rules only; pass `all` for every resource type. Unknown
+	// values return 400.
+	Type *string `form:"type,omitempty" json:"type,omitempty"`
 }
 
 // ResizeExecParams defines parameters for ResizeExec.
@@ -1536,6 +1854,13 @@ type ResizeExecParams struct {
 type GetFileParams struct {
 	// Path Absolute path inside the sandbox
 	Path string `form:"path" json:"path"`
+
+	// Follow Follow symbolic links in the source path (dereference). When
+	// true, a symlink at `path` is resolved to its target before the
+	// archive is produced, so the client receives the target's
+	// contents as a regular file rather than the link itself. Matches
+	// `docker cp -L SANDBOX:PATH -`.
+	Follow *bool `form:"follow,omitempty" json:"follow,omitempty"`
 }
 
 // PutFileParams defines parameters for PutFile.
@@ -1553,6 +1878,12 @@ type UnpublishPortsJSONBody = []PortKey
 // SetDaemonLogLevelJSONRequestBody defines body for SetDaemonLogLevel for application/json ContentType.
 type SetDaemonLogLevelJSONRequestBody = LogLevelRequest
 
+// CheckMcpRegistrationJSONRequestBody defines body for CheckMcpRegistration for application/json ContentType.
+type CheckMcpRegistrationJSONRequestBody = McpRegistrationCheckRequest
+
+// CheckNetworkPolicyJSONRequestBody defines body for CheckNetworkPolicy for application/json ContentType.
+type CheckNetworkPolicyJSONRequestBody = PolicyCheckRequest
+
 // ModifyNetworkPolicyRulesJSONRequestBody defines body for ModifyNetworkPolicyRules for application/json ContentType.
 type ModifyNetworkPolicyRulesJSONRequestBody = PolicyRulesRequest
 
@@ -1561,6 +1892,9 @@ type ApplyNetworkPolicySetupJSONRequestBody = PolicySetupRequest
 
 // CreateSandboxJSONRequestBody defines body for CreateSandbox for application/json ContentType.
 type CreateSandboxJSONRequestBody = SandboxCreateRequest
+
+// AttachAgentSessionJSONRequestBody defines body for AttachAgentSession for application/json ContentType.
+type AttachAgentSessionJSONRequestBody = AgentSessionRequest
 
 // SyncCredentialsJSONRequestBody defines body for SyncCredentials for application/json ContentType.
 type SyncCredentialsJSONRequestBody = SyncCredentialsRequest
@@ -1573,6 +1907,18 @@ type AttachExecJSONRequestBody = ExecRequest
 
 // AddKitJSONRequestBody defines body for AddKit for application/json ContentType.
 type AddKitJSONRequestBody = AddKitRequest
+
+// StartMcpGatewayJSONRequestBody defines body for StartMcpGateway for application/json ContentType.
+type StartMcpGatewayJSONRequestBody = McpGatewayStartRequest
+
+// AddMcpGatewayServerJSONRequestBody defines body for AddMcpGatewayServer for application/json ContentType.
+type AddMcpGatewayServerJSONRequestBody = McpGatewayAddServerRequest
+
+// RemoveAllowedPathJSONRequestBody defines body for RemoveAllowedPath for application/json ContentType.
+type RemoveAllowedPathJSONRequestBody = MountRemoveRequest
+
+// AddAllowedPathJSONRequestBody defines body for AddAllowedPath for application/json ContentType.
+type AddAllowedPathJSONRequestBody = MountAddRequest
 
 // PublishPortsJSONRequestBody defines body for PublishPorts for application/json ContentType.
 type PublishPortsJSONRequestBody = PublishPortsJSONBody
