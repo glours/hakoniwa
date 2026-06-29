@@ -50,14 +50,18 @@ func ResolveAgents(p *Project) map[string]*EffectiveAgent {
 	return out
 }
 
+// resolveOne merges the project defaults into a single agent and returns the
+// EffectiveAgent. All slice/map fields are defensively copied so the result is
+// an independent snapshot — mutations to the original Agent do not affect the
+// EffectiveAgent and vice versa.
 func resolveOne(name string, agent *Agent, defaults *Defaults) *EffectiveAgent {
 	ea := &EffectiveAgent{
 		Name:                 name,
-		Emits:                agent.Emits,
-		Subscribes:           agent.Subscribes,
-		DependsOn:            agent.DependsOn,
-		Reach:                agent.Reach,
-		Ports:                agent.Ports,
+		Emits:                append([]string(nil), agent.Emits...),
+		Subscribes:           append([]string(nil), agent.Subscribes...),
+		DependsOn:            copyDependsOn(agent.DependsOn),
+		Reach:                append([]string(nil), agent.Reach...),
+		Ports:                append([]string(nil), agent.Ports...),
 		Policy:               agent.Policy,
 		ProjectPolicyDefault: defaults.Policy.Default,
 		AllowWidening:        defaults.Policy.AllowWidening,
@@ -91,6 +95,12 @@ func resolveOne(name string, agent *Agent, defaults *Defaults) *EffectiveAgent {
 
 // mergeResources returns a Resources where each field falls back to the
 // project default if the agent-level value is zero.
+//
+// Note: zero is the only "unset" sentinel for numeric fields (there is no
+// pointer/optional type here). An explicit `cpus: 0` in YAML is therefore
+// indistinguishable from an absent field and will inherit the project default.
+// Intentional zero resources should be expressed by setting the project
+// default to zero as well.
 func mergeResources(projectDefault, agent Resources) Resources {
 	r := agent
 	if r.CPUs == 0 {
@@ -100,6 +110,19 @@ func mergeResources(projectDefault, agent Resources) Resources {
 		r.Memory = projectDefault.Memory
 	}
 	return r
+}
+
+// copyDependsOn makes a shallow copy of a depends_on map so the EffectiveAgent
+// owns its own map header (appending/deleting won't affect the original Agent).
+func copyDependsOn(m map[string]DependsOnEntry) map[string]DependsOnEntry {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]DependsOnEntry, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // unionStrings returns the ordered union of a and b with duplicates removed.

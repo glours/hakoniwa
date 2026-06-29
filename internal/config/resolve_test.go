@@ -70,6 +70,35 @@ func TestResolveAgentsSecretsNotInherited(t *testing.T) {
 	}
 }
 
+func TestResolveAgentsCredentialsNotInherited(t *testing.T) {
+	p := &config.Project{
+		Name: "test",
+		Defaults: config.Defaults{
+			Secrets: []config.Secret{{Env: "PROJECT_TOKEN", Value: "echo global"}},
+		},
+		Agents: map[string]*config.Agent{
+			"a": {
+				Agent:       "claude",
+				Credentials: []config.Secret{{Env: "MY_CRED", Value: "echo cred"}},
+			},
+			"b": {Agent: "gemini"},
+		},
+	}
+	agents := config.ResolveAgents(p)
+
+	a := agents["a"]
+	if len(a.Credentials) != 1 || a.Credentials[0].Env != "MY_CRED" {
+		t.Errorf("a.Credentials = %+v, want only MY_CRED", a.Credentials)
+	}
+	if len(a.Secrets) != 0 {
+		t.Errorf("a.Secrets should be empty (no secrets: key), got %+v", a.Secrets)
+	}
+	b := agents["b"]
+	if len(b.Credentials) != 0 {
+		t.Errorf("b.Credentials should be empty, got %+v", b.Credentials)
+	}
+}
+
 func TestResolveAgentsResourcesInherited(t *testing.T) {
 	p := &config.Project{
 		Name: "test",
@@ -88,12 +117,10 @@ func TestResolveAgentsResourcesInherited(t *testing.T) {
 	if full.Resources.CPUs != 8 || full.Resources.Memory != 16384 {
 		t.Errorf("full resources = %+v, want 8/16384", full.Resources)
 	}
-
 	partial := agents["partial"]
 	if partial.Resources.CPUs != 4 || partial.Resources.Memory != 4096 {
 		t.Errorf("partial resources = %+v, want 4 cpus + inherited 4096 mem", partial.Resources)
 	}
-
 	empty := agents["empty"]
 	if empty.Resources.CPUs != 2 || empty.Resources.Memory != 4096 {
 		t.Errorf("empty resources = %+v, want inherited 2/4096", empty.Resources)
@@ -146,11 +173,49 @@ func TestResolveAgentsCommandAlias(t *testing.T) {
 	p := &config.Project{
 		Name: "test",
 		Agents: map[string]*config.Agent{
-			"a": {Command: "claude"}, // uses command alias
+			"a": {Command: "claude"}, // uses command alias; agent: is empty
 		},
 	}
 	agents := config.ResolveAgents(p)
 	if agents["a"].AgentKind != "claude" {
 		t.Errorf("AgentKind = %q, want claude (from command alias)", agents["a"].AgentKind)
+	}
+}
+
+func TestResolveAgentsAgentFieldPrecedence(t *testing.T) {
+	// When both agent: and command: are set, agent: takes precedence.
+	p := &config.Project{
+		Name: "test",
+		Agents: map[string]*config.Agent{
+			"a": {Agent: "claude", Command: "codex"},
+		},
+	}
+	agents := config.ResolveAgents(p)
+	if agents["a"].AgentKind != "claude" {
+		t.Errorf("AgentKind = %q, want claude (agent: takes precedence over command:)", agents["a"].AgentKind)
+	}
+}
+
+func TestResolveAgentsDefensiveCopy(t *testing.T) {
+	// Mutations to the original Agent slices should not affect the EffectiveAgent.
+	agent := &config.Agent{
+		Agent:   "claude",
+		Emits:   []string{"ch.a"},
+		Ports:   []string{"8080:8080"},
+		Secrets: []config.Secret{{Env: "TOK", Value: "echo x"}},
+	}
+	p := &config.Project{Name: "test", Agents: map[string]*config.Agent{"a": agent}}
+	agents := config.ResolveAgents(p)
+	ea := agents["a"]
+
+	// Mutate original slices.
+	agent.Emits = append(agent.Emits, "ch.extra")
+	agent.Ports[0] = "9999:9999"
+
+	if len(ea.Emits) != 1 {
+		t.Errorf("ea.Emits affected by original mutation: %v", ea.Emits)
+	}
+	if ea.Ports[0] != "8080:8080" {
+		t.Errorf("ea.Ports affected by original mutation: %v", ea.Ports)
 	}
 }
