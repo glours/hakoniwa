@@ -172,14 +172,19 @@ func TestListPublishedPorts(t *testing.T) {
 }
 
 func TestPublishPorts(t *testing.T) {
+	result := []sandboxapi.PublishedPort{{HostPort: 9090, SandboxPort: 9090}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		writeJSON(t, w, http.StatusOK, result)
 	}))
 	defer srv.Close()
 
 	ports := []sandbox.PortPublishRequest{{HostPort: 9090, SandboxPort: 9090}}
-	if err := newTestClient(t, srv).PublishPorts(context.Background(), "proj-agent-a", ports); err != nil {
+	got, err := newTestClient(t, srv).PublishPorts(context.Background(), "proj-agent-a", ports)
+	if err != nil {
 		t.Fatalf("PublishPorts: %v", err)
+	}
+	if len(got) != 1 || got[0].HostPort != 9090 {
+		t.Errorf("unexpected result: %v", got)
 	}
 }
 
@@ -191,12 +196,67 @@ func TestPublishPortsBadRequest(t *testing.T) {
 	defer srv.Close()
 
 	ports := []sandbox.PortPublishRequest{{HostPort: 9090, SandboxPort: 9090}}
-	err := newTestClient(t, srv).PublishPorts(context.Background(), "proj-agent-a", ports)
+	_, err := newTestClient(t, srv).PublishPorts(context.Background(), "proj-agent-a", ports)
 	if err == nil {
 		t.Fatal("expected error for 400, got nil")
 	}
 	if !strings.Contains(err.Error(), "port 9090 already in use") {
 		t.Errorf("error %q does not contain port conflict message", err.Error())
+	}
+}
+
+func TestListPublishedPortsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).ListPublishedPorts(context.Background(), "no-such")
+	if !sandbox.IsNotFound(err) {
+		t.Errorf("expected *NotFoundError, got %T: %v", err, err)
+	}
+}
+
+func TestPublishPortsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).PublishPorts(context.Background(), "no-such",
+		[]sandbox.PortPublishRequest{{HostPort: 80, SandboxPort: 80}})
+	if !sandbox.IsNotFound(err) {
+		t.Errorf("expected *NotFoundError, got %T: %v", err, err)
+	}
+}
+
+func TestUnpublishPortsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	hostPort := 80
+	err := newTestClient(t, srv).UnpublishPorts(context.Background(), "no-such",
+		[]sandbox.PortKey{{HostPort: &hostPort}})
+	if !sandbox.IsNotFound(err) {
+		t.Errorf("expected *NotFoundError, got %T: %v", err, err)
+	}
+}
+
+func TestStartSandboxPortConflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusConflict,
+			sandboxapi.ErrorResponse{Message: "port replay conflict: 9090"})
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).StartSandbox(context.Background(), "proj-agent-a")
+	if err == nil {
+		t.Fatal("expected error for 409, got nil")
+	}
+	if !strings.Contains(err.Error(), "conflict") {
+		t.Errorf("error %q does not mention conflict", err.Error())
 	}
 }
 

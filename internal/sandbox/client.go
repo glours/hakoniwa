@@ -68,7 +68,9 @@ type Client interface {
 	ListPublishedPorts(ctx context.Context, name string) ([]PublishedPort, error)
 
 	// PublishPorts publishes the given port mappings for a sandbox.
-	PublishPorts(ctx context.Context, name string, ports []PortPublishRequest) error
+	// Returns the list of resulting port bindings, including auto-assigned
+	// host ports for entries where host_port was 0.
+	PublishPorts(ctx context.Context, name string, ports []PortPublishRequest) ([]PublishedPort, error)
 
 	// UnpublishPorts removes the given port mappings from a sandbox.
 	UnpublishPorts(ctx context.Context, name string, keys []PortKey) error
@@ -157,6 +159,13 @@ func (c *DaemonClient) StartSandbox(ctx context.Context, name string) (*SandboxI
 	if resp.HTTPResponse.StatusCode == http.StatusNotFound {
 		return nil, &NotFoundError{Resource: "sandbox " + name}
 	}
+	if resp.HTTPResponse.StatusCode == http.StatusConflict {
+		// 409 is returned for port-replay-conflict.
+		if resp.JSON409 != nil && resp.JSON409.Message != "" {
+			return nil, fmt.Errorf("startSandbox %q: conflict: %s", name, resp.JSON409.Message)
+		}
+		return nil, fmt.Errorf("startSandbox %q: port replay conflict (a host port is already in use)", name)
+	}
 	if resp.HTTPResponse.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("startSandbox %q: unexpected status %d", name, resp.HTTPResponse.StatusCode)
 	}
@@ -214,26 +223,29 @@ func (c *DaemonClient) ListPublishedPorts(ctx context.Context, name string) ([]P
 	return *resp.JSON200, nil
 }
 
-func (c *DaemonClient) PublishPorts(ctx context.Context, name string, ports []PortPublishRequest) error {
+func (c *DaemonClient) PublishPorts(ctx context.Context, name string, ports []PortPublishRequest) ([]PublishedPort, error) {
 	resp, err := c.api.PublishPortsWithResponse(ctx, sandboxapi.SandboxName(name),
 		sandboxapi.PublishPortsJSONRequestBody(ports))
 	if err != nil {
-		return fmt.Errorf("publishPorts %q: %w", name, err)
+		return nil, fmt.Errorf("publishPorts %q: %w", name, err)
 	}
 	if resp.HTTPResponse.StatusCode == http.StatusNotFound {
-		return &NotFoundError{Resource: "sandbox " + name}
+		return nil, &NotFoundError{Resource: "sandbox " + name}
 	}
 	if resp.HTTPResponse.StatusCode == http.StatusBadRequest {
 		// 400 carries a structured ErrorResponse (e.g. port conflict).
 		if resp.JSON400 != nil && resp.JSON400.Message != "" {
-			return fmt.Errorf("publishPorts %q: %s", name, resp.JSON400.Message)
+			return nil, fmt.Errorf("publishPorts %q: %s", name, resp.JSON400.Message)
 		}
-		return fmt.Errorf("publishPorts %q: bad request (port conflict?)", name)
+		return nil, fmt.Errorf("publishPorts %q: bad request (port conflict?)", name)
 	}
 	if resp.HTTPResponse.StatusCode != http.StatusOK {
-		return fmt.Errorf("publishPorts %q: unexpected status %d", name, resp.HTTPResponse.StatusCode)
+		return nil, fmt.Errorf("publishPorts %q: unexpected status %d", name, resp.HTTPResponse.StatusCode)
 	}
-	return nil
+	if resp.JSON200 == nil {
+		return nil, nil
+	}
+	return *resp.JSON200, nil
 }
 
 func (c *DaemonClient) UnpublishPorts(ctx context.Context, name string, keys []PortKey) error {
