@@ -171,6 +171,7 @@ func TestValidatePortSpecInvalid(t *testing.T) {
 		{"0:8080", "invalid host port"},
 		{"8080:99999", "invalid sandbox port"},
 		{"8080:8080/ftp", "unknown protocol"},
+		{"a:b:c:d", "invalid port spec"},
 	}
 	for _, tc := range cases {
 		p := makeProject(map[string]*config.Agent{
@@ -180,8 +181,50 @@ func TestValidatePortSpecInvalid(t *testing.T) {
 	}
 }
 
-func TestValidateDAGCycleDetected(t *testing.T) {
-	// a → b → c → a
+func TestValidateDependsOnAllConditions(t *testing.T) {
+	// All four valid conditions should pass validation.
+	for _, cond := range []config.DependsOnCondition{
+		config.ConditionCreated,
+		config.ConditionRunning,
+		config.ConditionCompleted,
+		config.ConditionOnEvent,
+	} {
+		p := makeProject(map[string]*config.Agent{
+			"a": {Agent: "claude"},
+			"b": {
+				Agent: "codex",
+				DependsOn: map[string]config.DependsOnEntry{
+					"a": {Condition: cond, Channel: "ch.a"},
+				},
+			},
+		})
+		if err := validate(p); err != nil {
+			t.Errorf("condition %q should pass validation, got: %v", cond, err)
+		}
+	}
+}
+
+func TestValidateSelfLoop(t *testing.T) {
+	p := makeProject(map[string]*config.Agent{
+		"a": {
+			Agent: "claude",
+			DependsOn: map[string]config.DependsOnEntry{
+				"a": {Condition: config.ConditionRunning},
+			},
+		},
+	})
+	// Both a cycle error and an existence error are expected (a depends on itself,
+	// and the self-dep also shows as an existing agent so no "undefined" error).
+	err := validate(p)
+	if err == nil {
+		t.Fatal("expected cycle error for self-loop, got nil")
+	}
+	assertHasError(t, err, "cycle")
+}
+
+
+	func TestValidateDAGCycleDetected(t *testing.T) {
+	// a -> b -> c -> a
 	p := makeProject(map[string]*config.Agent{
 		"a": {Agent: "claude", DependsOn: map[string]config.DependsOnEntry{
 			"c": {Condition: config.ConditionRunning},

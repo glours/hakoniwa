@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,12 +25,15 @@ type Diagnostic struct {
 	Remediation string // optional hint shown after the error message
 }
 
+// Error formats the diagnostic as "pos: severity: path: message".
+// If Pos.Line == 0 the position is shown as just the filename (or omitted if
+// the filename is also empty).
 func (d Diagnostic) Error() string {
 	pos := d.Pos.String()
 	if pos == "" {
 		return fmt.Sprintf("%s: %s: %s", string(d.Severity), d.Path, d.Message)
 	}
-	return fmt.Sprintf("%s: %s: %s", pos, d.Path, d.Message)
+	return fmt.Sprintf("%s: %s: %s: %s", pos, string(d.Severity), d.Path, d.Message)
 }
 
 // ValidationError is returned by Validate when there are one or more errors.
@@ -77,7 +81,8 @@ var validConditions = map[DependsOnCondition]bool{
 //   - Required fields: non-empty agents map; each agent has agent/command set
 //   - Enum: policy.default value
 //   - Enum: depends_on condition values
-//   - Port spec: host port required in every element of ports[]
+//   - Port spec: valid HOST_PORT:SBX_PORT [or HOST_IP:HOST_PORT:SBX_PORT]
+//     with optional /tcp|udp|sctp; host and sandbox port in 1-65535
 //   - depends_on target existence (every key references a defined agent)
 //   - DAG acyclicity (on depends_on edges)
 //
@@ -97,13 +102,20 @@ func Validate(r *LoadResult) *ValidationError {
 	}
 	errorf := func(path, msg string) { add(SeverityError, path, msg, "") }
 
-	// ── Required: non-empty agents ──────────────────────────────────────────
+	// -- Required: non-empty agents --
 	if len(p.Agents) == 0 {
 		errorf("agents", "no agents defined; at least one agent is required")
 	}
 
-	// ── Per-agent checks ────────────────────────────────────────────────────
-	for name, agent := range p.Agents {
+	// -- Per-agent checks (sorted for deterministic output) --
+	agentNames := make([]string, 0, len(p.Agents))
+	for name := range p.Agents {
+		agentNames = append(agentNames, name)
+	}
+	sort.Strings(agentNames)
+
+	for _, name := range agentNames {
+		agent := p.Agents[name]
 		base := "agents." + name
 
 		// Required: agent/command
@@ -111,8 +123,14 @@ func Validate(r *LoadResult) *ValidationError {
 			errorf(base, "agent must have an 'agent' (or 'command') field set")
 		}
 
-		// Enum: depends_on conditions
-		for depName, dep := range agent.DependsOn {
+		// Enum: depends_on conditions + target existence (sorted for determinism)
+		depNames := make([]string, 0, len(agent.DependsOn))
+		for depName := range agent.DependsOn {
+			depNames = append(depNames, depName)
+		}
+		sort.Strings(depNames)
+		for _, depName := range depNames {
+			dep := agent.DependsOn[depName]
 			path := base + ".depends_on." + depName
 			if !validConditions[dep.Condition] {
 				errorf(path, fmt.Sprintf("unknown condition %q (valid: created, running, completed, on_event)",
@@ -133,16 +151,16 @@ func Validate(r *LoadResult) *ValidationError {
 		}
 	}
 
-	// ── Enum: defaults.policy.default ───────────────────────────────────────
+	// -- Enum: defaults.policy.default --
 	if p.Defaults.Policy.Default != "" && !validPolicyDefaults[p.Defaults.Policy.Default] {
 		errorf("defaults.policy.default",
 			fmt.Sprintf("unknown policy default %q (valid: allow-all, balanced, deny-all)",
 				p.Defaults.Policy.Default))
 	}
 
-	// ── DAG acyclicity ───────────────────────────────────────────────────────
+	// -- DAG acyclicity --
 	if cycle := detectCycle(p.Agents); cycle != nil {
-		errorf("agents", fmt.Sprintf("dependency cycle detected: %s", strings.Join(cycle, " → ")))
+		errorf("agents", fmt.Sprintf("dependency cycle detected: %s", strings.Join(cycle, " -> ")))
 	}
 
 	if len(diags) == 0 {
@@ -155,8 +173,13 @@ func Validate(r *LoadResult) *ValidationError {
 // port is explicitly given. Accepted formats:
 //
 //	HOST_PORT:SANDBOX_PORT[/PROTO]
-//	HOST_IP:HOST_PORT:SANDBOX_PORT[/PROTO]
+//	HOST_IP:HOST_PORT:SANDBOX_PORT[/PROTO]  (IPv4 only)
+//
+// Note: IPv6 host addresses (e.g. [::1]:8080:8080) are not supported in v0
+// because the colon-split parser cannot distinguish IPv6 colons from field
+// separators. Use IPv4 or leave the host IP blank (all-interfaces).
 func validatePortSpec(spec string) error {
+	origSpec := spec // preserve the original for error messages
 	// Strip optional protocol suffix.
 	proto := ""
 	if idx := strings.LastIndex(spec, "/"); idx >= 0 {
@@ -173,29 +196,31 @@ func validatePortSpec(spec string) error {
 	case 2: // HOST_PORT:SANDBOX_PORT
 		hostPort = parts[0]
 		sandboxPort = parts[1]
-	case 3: // HOST_IP:HOST_PORT:SANDBOX_PORT
+	case 3: // HOST_IP:HOST_PORT:SANDBOX_PORT (IPv4 only)
 		hostPort = parts[1]
 		sandboxPort = parts[2]
 	default:
-		return fmt.Errorf("invalid port spec %q: expected HOST_PORT:SANDBOX_PORT or HOST_IP:HOST_PORT:SANDBOX_PORT", spec)
+		return fmt.Errorf("invalid port spec %q: expected HOST_PORT:SANDBOX_PORT or HOST_IP:HOST_PORT:SANDBOX_PORT (IPv6 not supported in v0)", origSpec)
 	}
 
 	if hostPort == "" {
-		return fmt.Errorf("host port is required in port spec %q", spec)
+		return fmt.Errorf("host port is required in port spec %q", origSpec)
 	}
 	if n, err := strconv.Atoi(hostPort); err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("invalid host port %q in port spec (must be 1–65535)", hostPort)
+		return fmt.Errorf("invalid host port %q in port spec %q (must be 1-65535)", hostPort, origSpec)
 	}
 	if sandboxPort == "" {
-		return fmt.Errorf("sandbox port is required in port spec %q", spec)
+		return fmt.Errorf("sandbox port is required in port spec %q", origSpec)
 	}
 	if n, err := strconv.Atoi(sandboxPort); err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("invalid sandbox port %q in port spec (must be 1–65535)", sandboxPort)
+		return fmt.Errorf("invalid sandbox port %q in port spec %q (must be 1-65535)", sandboxPort, origSpec)
 	}
 	return nil
 }
 
 // detectCycle uses DFS to find a cycle in the depends_on graph.
+// Agent names are iterated in sorted order to produce a deterministic cycle
+// path for reproducible error messages.
 // Returns the cycle path as a slice of agent names, or nil if acyclic.
 func detectCycle(agents map[string]*Agent) []string {
 	const (
@@ -212,10 +237,16 @@ func detectCycle(agents map[string]*Agent) []string {
 		stack = append(stack, name)
 		agent, ok := agents[name]
 		if ok {
+			// Sort dep names for deterministic traversal order.
+			depNames := make([]string, 0, len(agent.DependsOn))
 			for dep := range agent.DependsOn {
+				depNames = append(depNames, dep)
+			}
+			sort.Strings(depNames)
+			for _, dep := range depNames {
 				switch state[dep] {
 				case visiting:
-					// Found a cycle — extract it from the stack.
+					// Found a cycle -- extract it from the stack.
 					for i, n := range stack {
 						if n == dep {
 							cycle := make([]string, len(stack)-i+1)
@@ -224,7 +255,7 @@ func detectCycle(agents map[string]*Agent) []string {
 							return cycle
 						}
 					}
-					return []string{dep, dep} // fallback
+					return []string{dep, dep} // fallback (should not happen)
 				case unvisited:
 					if cycle := dfs(dep); cycle != nil {
 						return cycle
@@ -237,7 +268,13 @@ func detectCycle(agents map[string]*Agent) []string {
 		return nil
 	}
 
+	// Sort agent names for deterministic start order.
+	names := make([]string, 0, len(agents))
 	for name := range agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		if state[name] == unvisited {
 			if cycle := dfs(name); cycle != nil {
 				return cycle
