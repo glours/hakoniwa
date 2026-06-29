@@ -27,6 +27,13 @@ type SourcePos struct {
 }
 
 func (p SourcePos) String() string {
+	if p.Line == 0 {
+		// Position was not found in the index; show file only.
+		if p.File == "" {
+			return ""
+		}
+		return p.File
+	}
 	if p.File == "" {
 		return fmt.Sprintf("%d:%d", p.Line, p.Column)
 	}
