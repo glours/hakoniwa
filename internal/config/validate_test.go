@@ -222,8 +222,7 @@ func TestValidateSelfLoop(t *testing.T) {
 	assertHasError(t, err, "cycle")
 }
 
-
-	func TestValidateDAGCycleDetected(t *testing.T) {
+func TestValidateDAGCycleDetected(t *testing.T) {
 	// a -> b -> c -> a
 	p := makeProject(map[string]*config.Agent{
 		"a": {Agent: "claude", DependsOn: map[string]config.DependsOnEntry{

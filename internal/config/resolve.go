@@ -8,13 +8,13 @@ type EffectiveAgent struct {
 	Name string // the agent key from the YAML (e.g. "fixer")
 
 	// Runtime (from .sbxenv fields, post-merge)
-	AgentKind   string    // agent/command — the resolved kind
-	Template    string    // container image override
-	Resources   Resources // cpus/memory (project defaults inherited if agent omits)
-	Ports       []string  // declared host→sandbox port mappings
-	Kits        []string  // effective kits: defaults.kits ∪ agent.kits (deduped)
-	Secrets     []Secret  // only secrets the agent opted in to (no implicit inherit)
-	Credentials []Secret  // alias for Secrets (sbxenv compat); merged same way
+	AgentKind   string      // agent/command — the resolved kind
+	Template    string      // container image override
+	Resources   Resources   // cpus/memory (project defaults inherited if agent omits)
+	Ports       []string    // declared host→sandbox port mappings
+	Kits        []string    // effective kits: defaults.kits ∪ agent.kits (deduped)
+	Secrets     []Secret    // only secrets the agent opted in to (no implicit inherit)
+	Credentials []Secret    // alias for Secrets (sbxenv compat); merged same way
 	Policy      AgentPolicy // effective per-agent network policy
 
 	// Net-new orchestration fields (passed through unchanged from the agent)

@@ -186,7 +186,7 @@ func validatePortSpec(spec string) error {
 		proto = spec[idx+1:]
 		spec = spec[:idx]
 		if proto != "tcp" && proto != "udp" && proto != "sctp" {
-			return fmt.Errorf("unknown protocol %q in port spec (valid: tcp, udp, sctp)", proto)
+			return fmt.Errorf("unknown protocol %q in port spec %q (valid: tcp, udp, sctp)", proto, origSpec)
 		}
 	}
 
