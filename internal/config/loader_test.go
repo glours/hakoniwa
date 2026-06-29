@@ -153,21 +153,21 @@ agents:
 }
 
 func TestLoadEmptyAgents(t *testing.T) {
-	// A file with no agents field should still parse (validation catches it).
-	yaml := `name: empty\n`
+	// A file with no agents field should still parse without crashing
+	// (semantic validation catches the missing agents; that's task 1.4).
+	yaml := "name: empty\n"
 	result, err := loadString(yaml)
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
-	if result.Project.Name != "empty\\n" {
-		// YAML inline literal; just verify it parsed without crashing.
+	if result.Project.Name != "empty" {
+		t.Errorf("name = %q, want \"empty\"", result.Project.Name)
 	}
-	_ = result
 }
 
 func TestFileResolutionOrder(t *testing.T) {
 	dir := t.TempDir()
-	// Write a hako.yaml and a hakoniwa.yaml; hakoniwa.yaml should win.
+	// hakoniwa.yaml wins over all others
 	writeFile(t, dir, "hako.yaml", "name: from-hako\nagents:\n  a:\n    agent: x\n")
 	writeFile(t, dir, "hakoniwa.yaml", "name: from-hakoniwa\nagents:\n  a:\n    agent: x\n")
 
@@ -184,11 +184,67 @@ func TestFileResolutionOrder(t *testing.T) {
 	}
 }
 
-func TestNoProjectFile(t *testing.T) {
+func TestFileResolutionYmlExtension(t *testing.T) {
+	// hakoniwa.yml is found before hako.yaml
 	dir := t.TempDir()
-	_, err := config.FindProjectFile(dir)
+	writeFile(t, dir, "hako.yaml", "name: from-hako\nagents:\n  a:\n    agent: x\n")
+	writeFile(t, dir, "hakoniwa.yml", "name: from-hakoniwa-yml\nagents:\n  a:\n    agent: x\n")
+
+	found, err := config.FindProjectFile(dir)
+	if err != nil {
+		t.Fatalf("FindProjectFile: %v", err)
+	}
+	result, err := config.Load(found)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if result.Project.Name != "from-hakoniwa-yml" {
+		t.Errorf("expected hakoniwa.yml to win, got name=%q", result.Project.Name)
+	}
+}
+
+func TestFileResolutionSbxenv(t *testing.T) {
+	// .sbxenv is accepted as last-resort fallback
+	dir := t.TempDir()
+	writeFile(t, dir, ".sbxenv", "name: from-sbxenv\nagents:\n  a:\n    agent: x\n")
+
+	found, err := config.FindProjectFile(dir)
+	if err != nil {
+		t.Fatalf("FindProjectFile: %v", err)
+	}
+	result, err := config.Load(found)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if result.Project.Name != "from-sbxenv" {
+		t.Errorf("expected .sbxenv to be loaded, got name=%q", result.Project.Name)
+	}
+}
+
+func TestMultiDocumentYAMLRejected(t *testing.T) {
+	yaml := "name: first\nagents:\n  a:\n    agent: x\n---\nname: second\n"
+	_, err := loadString(yaml)
 	if err == nil {
-		t.Fatal("expected error when no project file found")
+		t.Fatal("expected error for multi-document YAML, got nil")
+	}
+	if !strings.Contains(err.Error(), "multi-document") {
+		t.Errorf("error %q does not mention multi-document", err.Error())
+	}
+}
+
+func TestAgentPolicyDefaultRejected(t *testing.T) {
+	// policy.default must not be accepted at the per-agent level (project-only).
+	yaml := `
+name: test
+agents:
+  a:
+    agent: claude
+    policy:
+      default: allow-all
+`
+	_, err := loadString(yaml)
+	if err == nil {
+		t.Fatal("expected error for per-agent policy.default, got nil")
 	}
 }
 

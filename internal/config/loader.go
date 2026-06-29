@@ -110,6 +110,11 @@ func load(name string, r io.Reader) (*LoadResult, error) {
 		}
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
+	// Reject multi-document files: a second Decode should reach EOF.
+	var extra interface{}
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: multi-document YAML is not supported; use a single document", name)
+	}
 
 	return &LoadResult{
 		Project:   &project,

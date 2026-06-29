@@ -42,12 +42,21 @@ type NetworkPolicy struct {
 	Deny  []string `yaml:"deny,omitempty"`
 }
 
-// Policy holds all policy settings for an agent or the project defaults.
-// Default is only valid at the project level (inside defaults.policy).
-type Policy struct {
+// ProjectPolicy holds policy settings valid at the project (defaults) level.
+// Default and AllowWidening are host-global settings; they are only valid
+// under defaults.policy and must not appear per-agent.
+type ProjectPolicy struct {
 	Default       PolicyDefault `yaml:"default,omitempty"`
 	AllowWidening bool          `yaml:"allow_widening,omitempty"`
 	Network       NetworkPolicy `yaml:"network,omitempty"`
+}
+
+// AgentPolicy holds per-agent policy settings.
+// It intentionally omits Default and AllowWidening; those are project-level
+// only (see design §6) and are rejected at parse time by using this struct
+// rather than ProjectPolicy.
+type AgentPolicy struct {
+	Network NetworkPolicy `yaml:"network,omitempty"`
 }
 
 // DependsOnEntry describes a single depends_on edge to another agent.
@@ -67,9 +76,9 @@ type Agent struct {
 	Ports     []string  `yaml:"ports,omitempty"`
 	Secrets   []Secret  `yaml:"secrets,omitempty"`
 	// Credentials is an alias for Secrets (sbxenv compat)
-	Credentials []Secret `yaml:"credentials,omitempty"`
-	Kits        []string `yaml:"kits,omitempty"`
-	Policy      Policy   `yaml:"policy,omitempty"`
+	Credentials []Secret    `yaml:"credentials,omitempty"`
+	Kits        []string    `yaml:"kits,omitempty"`
+	Policy      AgentPolicy `yaml:"policy,omitempty"`
 
 	// Net-new Hakoniwa fields
 	Emits      []string                  `yaml:"emits,omitempty"`
@@ -80,11 +89,11 @@ type Agent struct {
 
 // Defaults holds project-level defaults merged into every agent.
 type Defaults struct {
-	Policy    Policy   `yaml:"policy,omitempty"`
-	Kits      []string `yaml:"kits,omitempty"`
-	Secrets   []Secret `yaml:"secrets,omitempty"`
-	Resources Resources `yaml:"resources,omitempty"`
-	Template  string   `yaml:"template,omitempty"`
+	Policy    ProjectPolicy `yaml:"policy,omitempty"`
+	Kits      []string      `yaml:"kits,omitempty"`
+	Secrets   []Secret      `yaml:"secrets,omitempty"`
+	Resources Resources     `yaml:"resources,omitempty"`
+	Template  string        `yaml:"template,omitempty"`
 }
 
 // Project is the top-level parsed representation of a hakoniwa.yaml /
