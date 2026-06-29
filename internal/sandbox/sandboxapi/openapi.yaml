@@ -1,0 +1,4315 @@
+openapi: "3.0.3"
+info:
+  title: Docker Sandboxes API
+  description: |
+    API for managing Docker Sandboxes — isolated containers for AI coding agents.
+
+    ## Endpoint groups
+    - **Daemon** (`/daemon`): Health, version discovery, shutdown.
+    - **Sandbox** (`/sandbox`): Full sandbox lifecycle — create, inspect, start, stop, delete.
+    - **Docker** (`/docker`): Proxy for a subset of the Docker Engine API.
+    - **Policy** (`/policy`): Network policy management.
+    - **Legacy** (`/version`): Deprecated, retained for old client compatibility.
+  version: "0.21.0"
+  license:
+    name: Apache 2.0
+
+servers:
+  - url: http://localhost
+    description: sandboxd Unix socket
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+
+  # ── Daemon ───────────────────────────────────────────────────────────────
+  /daemon/health:
+    get:
+      operationId: getDaemonHealth
+      summary: Health check and version discovery
+      description: |
+        Returns daemon health, version, release flag, and API version.
+        New clients use this to discover capabilities and perform version
+        comparison locally. The legacy GET /health endpoint remains
+        registered separately for old clients.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Daemon is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /daemon/info:
+    get:
+      operationId: getDaemonInfo
+      summary: Daemon runtime information
+      description: |
+        Returns daemon runtime details including the sandboxd API socket
+        path and the docker backend socket path. These are daemon-wide
+        properties, not per-sandbox.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Daemon info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonInfo"
+
+  /daemon/diagnostics:
+    get:
+      operationId: getDaemonDiagnostics
+      summary: Daemon diagnostic snapshot
+      description: |
+        Returns a structured diagnostic snapshot of the running daemon
+        intended for support triage. The response includes the
+        docker-next pkg/diag.Info snapshot (host environment, daemon
+        process memory, sandbox/image counts, containerd config,
+        goroutine stacks — all redacted via sanitize.ObfuscateLog) plus
+        byte-length signals for AF_UNIX sockaddr_un.sun_path values
+        that have historically caused hard-to-diagnose hangs when long
+        usernames push paths past the kernel limit. Heavier than
+        /daemon/info. Hit on every `sbx diagnose` invocation (via the
+        DaemonDiagnosticsCheck), but the response body is only added
+        to the upload bundle when `sbx diagnose --upload` is used.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Diagnostic snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonDiagnostics"
+
+  /daemon/debug/state:
+    get:
+      operationId: getDebugState
+      summary: Debug snapshot of runtime, secret, OAuth, and Docker state
+      description: |
+        Returns a read-only snapshot of the daemon's internal view of the
+        system, for debugging hard-to-diagnose failures (e.g. sandbox
+        creation failing with "failed to create network: already exists",
+        which signals drift between sandboxd's in-memory runtime map and the
+        actual Docker daemon state).
+
+        The response covers, per runtime: whether OAuth interception is wired
+        and for which service, the proxy address, published-port count,
+        active session count, dispatch/cache fingerprints, and MCP-gateway
+        presence. It also reports registry-level OAuth token-manager state,
+        the secrets injected per VM, a scan of all containers and networks on
+        the Docker daemon (tagging which are sandbox-managed), and a drift
+        report cross-referencing the two.
+
+        SECURITY: this endpoint never emits secret material. Token-manager
+        and per-secret fields report only presence/classification
+        (populated / empty / whitespace / unknown); every value field is the
+        literal "***". Secret source file paths are never reported; env-var
+        names are. Container environment variables are never read.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Debug state snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DebugStateResponse"
+        "503":
+          description: Backend not available (daemon degraded)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /daemon/shutdown:
+    post:
+      operationId: shutdownDaemon
+      summary: Initiate graceful shutdown
+      description: Stops all running sandboxes and shuts down the daemon.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Shutdown initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShutdownResponse"
+
+  /daemon/reset:
+    post:
+      operationId: resetDaemon
+      summary: Remove all sandboxes and clean up state
+      description: Stops and removes all sandboxes, deletes all state directories.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Reset complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetResponse"
+
+  /daemon/loglevel:
+    get:
+      operationId: getDaemonLogLevel
+      summary: Get current per-category log levels
+      description: |
+        Returns the runtime-mutable log-level threshold for every registered
+        category (e.g. "proxy", "general"). Useful for inspecting what's
+        currently being captured before raising verbosity for a debug session.
+      tags: [Daemon]
+      responses:
+        "200":
+          description: Current log levels keyed by category
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogLevelMap"
+
+  /daemon/loglevel/{target}:
+    post:
+      operationId: setDaemonLogLevel
+      summary: Set the log level for one category (or all)
+      description: |
+        Mutates the threshold for a single category. The reserved target
+        value `all` fans the level out to every registered category and is
+        write-only — it never appears in `GET /daemon/loglevel`.
+
+        Changes are ephemeral and reset to the daemon's startup level when
+        sandboxd restarts.
+      tags: [Daemon]
+      parameters:
+        - name: target
+          in: path
+          required: true
+          description: |
+            Category to mutate (e.g. `proxy`, `general`) or the reserved
+            fan-out target `all`.
+          schema:
+            type: string
+            pattern: "^[a-z][a-z0-9_-]*$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogLevelRequest"
+      responses:
+        "204":
+          description: Level updated
+        "400":
+          description: Unknown target or invalid level
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Log-level registry not initialized on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Sandbox ──────────────────────────────────────────────────────────────
+  /sandbox:
+    post:
+      operationId: createSandbox
+      summary: Create a sandbox
+      description: |
+        Creates a sandbox from a high-level intent. The daemon handles name
+        generation, template resolution, credential discovery, container
+        configuration, and network setup. The client sends what it wants;
+        the daemon figures out how to build it.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxCreateRequest"
+      responses:
+        "201":
+          description: Sandbox created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxCreateResponse"
+        "409":
+          description: Sandbox with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: listSandboxes
+      summary: List all sandboxes
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: List of sandboxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SandboxInfo"
+
+
+  /sandbox/{name}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: inspectSandbox
+      summary: Inspect a sandbox
+      description: |
+        Returns the sandbox's high-level state: name, agent, running/stopped
+        status, workspace, additional workspace mounts, creation timestamp,
+        published ports, and (when applicable) git worktree metadata. This
+        is the daemon's view of the sandbox — it does not include Docker
+        container internals (container ID, env, mounts, exit code).
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Sandbox details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxInfo"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: |
+            The sandbox is registered but its backend view could not be
+            resolved (transient SDK/socket failure). Distinguished from
+            404 so callers don't mis-classify a transient outage as
+            ErrSandboxNotFound.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteSandbox
+      summary: Delete a sandbox
+      description: Stops and removes the sandbox, its network, and associated state.
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Sandbox deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/start:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: startSandbox
+      summary: Start a stopped sandbox
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Sandbox started (or was already running)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxInfo"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            A remembered explicit host-port publish request could not be
+            replayed because the host port is already in use. The response
+            has `code: "port_replay_conflict"` and includes
+            `port_replay_conflict` details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: |
+            Start succeeded but the post-action lookup returned a
+            transient SDK/socket failure, so the daemon can't include
+            the updated SandboxInfo in the response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/stop:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: stopSandbox
+      summary: Stop a running sandbox
+      description: |
+        Stops the sandbox container. Returns the updated SandboxInfo so
+        callers see the post-action state without a follow-up GET — same
+        shape as startSandbox for symmetry.
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Sandbox stopped (or was already stopped)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxInfo"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: |
+            Stop succeeded but the post-action lookup returned a
+            transient SDK/socket failure, so the daemon can't include
+            the updated SandboxInfo in the response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/credentials:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: syncCredentials
+      summary: Sync credentials to a running sandbox
+      description: |
+        Re-syncs credentials into the sandbox. If a request body is omitted,
+        the daemon syncs only credentials it can discover itself (e.g. file-based
+        cloud-CLI credentials on the host filesystem). If the body includes
+        `credential_values`, those values are also synced — typically used by
+        the CLI to forward env-var-based credentials that the daemon can't see.
+        If the body includes `custom_secrets`, it replaces the existing set
+        wholesale (declared end-state): an explicitly-empty array clears the
+        set; an omitted `custom_secrets` field leaves it untouched.
+      tags: [Sandbox]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncCredentialsRequest"
+      responses:
+        "200":
+          description: Credentials synced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncCredentialsResult"
+        "400":
+          description: |
+            Malformed request body (invalid JSON) or invalid custom-secret
+            content (empty or duplicate sentinels).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon backend is degraded — either the docker backend
+            is unavailable, or proxy dependencies (secrets store) were
+            not wired at startup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/mounts:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: addAllowedPath
+      summary: Expose a host path into a running sandbox
+      description: |
+        Adds `host_path` to the policy-enabled "host" virtiofs share's
+        allowlist so the path becomes accessible at
+        `/mnt/host/<canonical-host-path>` inside the running sandbox's VM
+        with no reboot. Idempotent at the allowlist level: re-adding an
+        already-allowed path is a no-op success. The sandbox must be running.
+
+        Mount policy (governance) is enforced before the call reaches the
+        backend. A denied path returns 403.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MountAddRequest"
+      responses:
+        "200":
+          description: Path added to the allowlist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Malformed request body or invalid host_path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Mount policy denied the requested host_path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox is not running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend is degraded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: removeAllowedPath
+      summary: Revoke a previously-exposed host path
+      description: |
+        Removes `host_path` from the policy-enabled "host" share's allowlist.
+        The path becomes invisible inside the sandbox immediately. Removing
+        a path that was not present is a no-op success (200). When
+        `container_target` is set, the bind at that path inside the
+        container is umounted first; when it is omitted, ONLY the allowlist
+        entry is dropped (no host-path-only umount semantics).
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MountRemoveRequest"
+      responses:
+        "200":
+          description: Path removed (or was not present)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Malformed request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox is not running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend is degraded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/ports:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: publishPorts
+      summary: Publish one or more ports from sandbox to host
+      description: |
+        Publishes all requested ports atomically — if any port fails
+        (e.g. host port already in use), none are published and the
+        response is an error.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/PortPublishRequest"
+      responses:
+        "200":
+          description: All ports published successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PublishedPort"
+        "400":
+          description: One or more ports could not be published
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: listPublishedPorts
+      summary: List published ports for a sandbox
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Published ports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PublishedPort"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/ports/unpublish:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: unpublishPorts
+      summary: Remove one or more published ports
+      description: |
+        Each entry in the request body is a `PortKey` — a container-side
+        identifier (`sandbox_port` plus optional disambiguators) rather
+        than a publish-time descriptor. This means callers don't need to
+        remember the auto-assigned `host_port` from the original publish
+        in order to undo it.
+
+        Idempotent — unpublishing a port that is not currently published
+        is a no-op success. The client declares the desired end state
+        ("these ports should not be published") and the daemon ensures it.
+
+        Uses POST rather than DELETE to avoid interoperability issues with
+        DELETE request bodies in some HTTP clients and proxies.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/PortKey"
+      responses:
+        "200":
+          description: All requested ports are not published
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/ports/replace-desired:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: replaceDesiredPort
+      summary: Replace a persisted port replay intent
+      description: |
+        Replaces one saved port-publish intent for a stopped sandbox without
+        touching live portmapper state. This endpoint is intended for
+        `port_replay_conflict` recovery: the client receives a conflict from
+        `startSandbox`, asks the user for a different host port, replaces the
+        saved intent, then retries `startSandbox`.
+
+        A port replay conflict means `startSandbox` successfully started the
+        sandbox container, then failed while replaying a previously requested
+        explicit host-port publish because the host port is already in use.
+        The daemon stops the container again before returning the structured
+        `port_replay_conflict` error, so callers can update the persisted
+        desired mapping and retry the start.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortReplaceDesiredRequest"
+      responses:
+        "200":
+          description: Persisted port intent replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Invalid replacement request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox or persisted port intent not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/exec:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: exec
+      summary: Execute a non-interactive command in a sandbox
+      description: |
+        Runs a command inside the sandbox container and returns stdout,
+        stderr, and exit code in the response body.
+
+        For interactive use (PTY allocation, bidirectional streaming,
+        terminal resize) call POST /sandbox/{name}/exec/attach instead —
+        that endpoint upgrades the connection to a raw bidirectional
+        stream that mirrors Moby's `/exec/{id}/start` protocol.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "200":
+          description: Command completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecResult"
+        "400":
+          description: Invalid request (empty cmd, empty cmd element, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox container is not running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error invoking exec
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon docker backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/exec/attach:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: attachExec
+      summary: Open an interactive exec session over HTTP Upgrade
+      description: |
+        Creates an exec instance inside the sandbox's container and
+        upgrades the connection to a raw bidirectional byte stream. The
+        wire protocol mirrors the Docker Engine API's `/exec/{id}/start`
+        — POST with `Connection: Upgrade` and `Upgrade: tcp` headers,
+        server responds `101 Switching Protocols`, then the underlying
+        TCP connection becomes a raw duplex stream for the lifetime of
+        the exec.
+
+        **Wire format after upgrade.**
+
+        - **TTY mode** (`tty: true`): raw bytes both ways. Client → server
+          is stdin; server → client is the combined PTY output (Moby
+          does not multiplex stdout/stderr in TTY mode).
+        - **Non-TTY mode** (`tty: false`): client → server is raw stdin;
+          server → client uses the `stdcopy` framing — 8-byte header
+          `[stream_type(1)][zero(3)][length(4)]` per chunk, where
+          `stream_type` is 1 (stdout) or 2 (stderr). Demultiplex with
+          `stdcopy.StdCopy` from `github.com/moby/moby/api/pkg/stdcopy`.
+
+        **Exec ID lifecycle.** The 101 response carries the
+        `Sandboxes-Exec-Id` header — the docker-backend exec ID used by
+        `POST /sandbox/{name}/exec/{exec_id}/resize` (TTY resize) and
+        `GET /sandbox/{name}/exec/{exec_id}` (post-stream exit code).
+        Out of band like Moby's protocol; the upgraded stream itself
+        carries only bytes, not control messages.
+
+        **Close.** The server closes the upgraded connection when the
+        exec exits. Clients may close at any time to detach.
+
+        This endpoint is not emitted by the generated client wrappers —
+        callers use a hand-written helper in `sandboxapi` that manages
+        the upgrade handshake and returns the upgraded `net.Conn`.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "101":
+          description: |
+            Switching protocols — connection is now a raw bidirectional
+            byte stream. The `Sandboxes-Exec-Id` header carries the
+            exec ID for resize/inspect calls.
+          headers:
+            Sandboxes-Exec-Id:
+              description: Docker-backend exec ID for resize and inspect
+              schema:
+                type: string
+        "400":
+          description: Missing or invalid upgrade headers, or malformed body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox container is not running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error invoking exec
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon docker backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/exec/{exec_id}/resize:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+      - name: exec_id
+        in: path
+        required: true
+        description: Exec ID returned from `attachExec` in the `Sandboxes-Exec-Id` header.
+        schema:
+          type: string
+    post:
+      operationId: resizeExec
+      summary: Resize an interactive exec's PTY
+      description: |
+        Out-of-band TTY resize for a running interactive exec. Mirrors
+        Moby's `POST /exec/{id}/resize` semantics: takes the new
+        terminal dimensions as query parameters and applies them to the
+        exec's PTY. Only meaningful when the exec was created with
+        `tty: true`.
+      tags: [Sandbox]
+      parameters:
+        - name: h
+          in: query
+          required: true
+          description: Terminal height in rows
+          schema:
+            type: integer
+            minimum: 1
+        - name: w
+          in: query
+          required: true
+          description: Terminal width in columns
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Resize applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Invalid dimensions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox or exec not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error invoking resize
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon docker backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/exec/{exec_id}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+      - name: exec_id
+        in: path
+        required: true
+        description: Exec ID returned from `attachExec` in the `Sandboxes-Exec-Id` header.
+        schema:
+          type: string
+    get:
+      operationId: inspectExec
+      summary: Inspect an interactive exec
+      description: |
+        Returns the exec's current state (running flag + exit code if
+        complete). Callers poll this after the upgraded stream closes
+        to recover the exit code, mirroring `docker exec`'s control
+        flow. Mirrors Moby's `GET /exec/{id}/json`.
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Exec state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecInspect"
+        "404":
+          description: Sandbox or exec not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error reading exec state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon docker backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/agent/session:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: attachAgentSession
+      summary: Open an interactive session with the sandbox's agent over HTTP Upgrade
+      description: |
+        Starts the sandbox (if stopped) and runs its baked-in agent start
+        script (`/usr/local/lib/sandbox/start-agent`), upgrading the
+        connection to a raw bidirectional byte stream. The wire protocol is
+        identical to POST /sandbox/{name}/exec/attach — see that endpoint for
+        the TTY / non-TTY framing and the `Sandboxes-Exec-Id` lifecycle.
+
+        Unlike exec/attach the client supplies no command: the sandbox is
+        self-describing. The daemon synthesizes `sh <start-script> <args>`,
+        so clients need zero agent knowledge — they open a session and
+        forward `args`.
+
+        **Self-heal.** If the start script is missing (a sandbox created
+        before the script existed) the daemon needs the launch command to
+        write it. When `start_command` is supplied the daemon heal-writes the
+        script and proceeds; when it is omitted the daemon returns 422 so the
+        client can resolve the command from its agent registry — or surface
+        guidance for an unknown custom agent — and retry.
+
+        Like `POST /sandbox/{name}/exec/attach`, this endpoint is not emitted
+        by the generated client wrappers; callers use a hand-written upgrade
+        helper in `sandboxapi` that manages the handshake and returns the
+        upgraded `net.Conn` (added alongside the client that adopts it).
+      tags: [Sandbox]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSessionRequest"
+      responses:
+        "101":
+          description: |
+            Switching protocols — connection is now a raw bidirectional
+            byte stream. The `Sandboxes-Exec-Id` header carries the
+            exec ID for resize/inspect calls.
+          headers:
+            Sandboxes-Exec-Id:
+              description: Docker-backend exec ID for resize and inspect
+              schema:
+                type: string
+        "400":
+          description: Missing or invalid upgrade headers, or malformed body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: |
+            The agent start script is missing and no `start_command` was
+            supplied to heal-write it. The client should resolve the launch
+            command and retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error starting the agent session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon docker backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/files:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: getFile
+      summary: Copy a file or directory from a sandbox
+      description: |
+        Returns the contents of a file or directory from the sandbox as a
+        tar archive stream. Matches the semantics of `docker cp SANDBOX:PATH -`.
+
+        Use `sandboxapi.GetFile` (hand-written, returns `*http.Response`
+        for streaming); the generated `ClientWithResponses` wrapper is
+        intentionally not emitted for this endpoint to prevent
+        eager-buffering misuse.
+      tags: [Sandbox]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute path inside the sandbox
+          schema:
+            type: string
+        - name: follow
+          in: query
+          required: false
+          description: |
+            Follow symbolic links in the source path (dereference). When
+            true, a symlink at `path` is resolved to its target before the
+            archive is produced, so the client receives the target's
+            contents as a regular file rather than the link itself. Matches
+            `docker cp -L SANDBOX:PATH -`.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Tar archive of the file or directory
+          content:
+            application/x-tar:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Path query parameter missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox or path not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox container is not running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error producing the archive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon is degraded (no docker backend)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: putFile
+      summary: Copy a file or directory into a sandbox
+      description: |
+        Uploads a tar archive and extracts it into the directory given by
+        the `path` query parameter (the daemon runs `tar -C <path>`). The
+        archive's own entry names determine the final destination paths, so
+        `path` is the extraction root, not a literal destination filename.
+        The CLI builds the archive so the overall result matches
+        `docker cp - SANDBOX:PATH`; non-CLI clients must construct entry
+        names accordingly.
+
+        The request body is streamed straight into a tar-extract exec
+        inside the sandbox; no buffering of the archive happens on the
+        daemon side.
+      tags: [Sandbox]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute path inside the sandbox to extract into
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-tar:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Files copied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Path query parameter missing, or the request body is not a valid tar stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox container is not running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error extracting the archive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon is degraded (no docker backend)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/kits:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: addKit
+      summary: Inject a kit into a running sandbox
+      description: |
+        Applies a kit to a running sandbox. The kit can be specified as a
+        reference (local directory, ZIP file, OCI image, or git URL) that
+        the daemon resolves, or as an inline tar archive in the request body.
+
+        Runtime injection can apply files, environment variables, install
+        commands, startup commands, init scripts, and AI memory content.
+        It cannot apply security settings, container mounts, or agent-type
+        kits — those require sandbox recreation.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddKitRequest"
+      responses:
+        "200":
+          description: Kit applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Kit cannot be applied (e.g. agent kit, invalid reference)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/save:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: saveSandbox
+      summary: Save a sandbox as a template image
+      description: |
+        Commits a stopped sandbox container as a named template image.
+        The image can later be exported as a tar via GET /docker/images/export,
+        or used as a template for new sandboxes.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveRequest"
+      responses:
+        "201":
+          description: Image created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveResponse"
+        "400":
+          description: |
+            Missing sandbox name, missing tag, or a tag that is not a
+            valid image reference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Sandbox is running; stop it before saving
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: |
+            The container could not be inspected or committed (transient
+            SDK/socket failure), or the sandbox has no socket path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/session:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: sessionHold
+      summary: Long-poll session connection
+      description: |
+        Opens a long-poll connection that the daemon parks for the
+        duration of the client's session. The sandbox auto-stops when
+        the count of held sessions drops to zero (detached sandboxes
+        excepted — they ignore session counts).
+
+        ## Wire protocol
+
+        The daemon writes the HTTP/1.1 status line and headers, flushes,
+        and then writes nothing else for the lifetime of the call. There
+        is no body content, no chunked frames, and no heartbeats — the
+        TCP / Unix-socket connection itself is the lifecycle signal.
+
+        Specifically:
+
+        - **Established**: a flushed `200 OK` with no payload bytes.
+          Clients can rely on the headers arriving promptly as their
+          "session is registered" signal (e.g. the CLI gates exec on
+          this so the container is known to be ready).
+        - **In progress**: the daemon does not send any further bytes.
+          A reader will block until the connection closes. Clients that
+          want to detect dead sessions should rely on TCP-level keepalives
+          rather than expecting a heartbeat.
+        - **End of session**: the client closes the connection (or
+          cancels its context). The daemon sees the request context
+          cancellation and decrements the session count, possibly
+          triggering an auto-stop. The daemon does not send a final
+          payload before the close — there is nothing for the client
+          to read on shutdown.
+        - **Daemon-initiated termination**: the daemon currently does
+          not preempt sessions; it only releases when the client goes
+          away. If this changes, the close will be plain (no farewell
+          payload) and the new behaviour will be documented here.
+
+        Because there are no bytes after the headers, the helper
+        `sandboxapi.SessionHold` returns the raw `*http.Response`
+        without reading the body — closing it (or cancelling the
+        request context) is the disconnect signal.
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: |
+            Session established. Headers are flushed before the daemon
+            parks the connection; no body bytes follow. Close the
+            connection (or cancel the request context) to end the
+            session.
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/mcp/gateway:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: startMcpGateway
+      summary: Start (or reuse) the sandbox's MCP aggregate gateway
+      description: |
+        Starts an MCP aggregate gateway for the sandbox in the daemon
+        process. The gateway persists across client invocations and is
+        torn down automatically when the sandbox is removed.
+
+        This may be called before the sandbox exists, as a reservation:
+        when the named sandbox is absent the daemon still provisions the
+        gateway so its URL can be baked into the container environment at
+        create time. A gateway already running for the same sandbox is
+        reused rather than re-provisioned and reported with `reused: true`
+        — a caller that paired the start with a teardown should treat the
+        teardown as a no-op in that case.
+
+        Gated on the daemon's MCP feature: when MCP is not enabled the
+        daemon returns 501 Not Implemented rather than a route 404, so a
+        client can distinguish "feature off" from "no such route".
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpGatewayStartRequest"
+      responses:
+        "200":
+          description: Gateway running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpGatewayStartResponse"
+        "400":
+          description: Missing sandbox name, or an invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: |
+            The gateway could not be provisioned — control-plane or
+            local-gateway startup failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: MCP gateway not enabled on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: getMcpGateway
+      summary: Get the sandbox's MCP gateway status
+      description: |
+        Returns the running gateway's local port and URL. Responds 404
+        when no gateway is running for the sandbox — including the case
+        where only persisted control-plane state survives a daemon
+        restart but the local gateway has not been re-started. Gated on
+        the MCP feature like the start operation.
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Gateway status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpGatewayStatusResponse"
+        "404":
+          description: No gateway running for this sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: MCP gateway not enabled on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: stopMcpGateway
+      summary: Stop the sandbox's MCP gateway
+      description: |
+        Stops the gateway and releases its control-plane resources.
+        Responds 404 when no gateway is running for the sandbox. Gated on
+        the MCP feature like the start operation.
+      tags: [Sandbox]
+      responses:
+        "204":
+          description: Gateway stopped
+        "404":
+          description: No gateway running for this sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: MCP gateway not enabled on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /sandbox/{name}/mcp/gateway/servers:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: addMcpGatewayServer
+      summary: Live-add a registered MCP server to the running gateway
+      description: |
+        Attaches an already-registered MCP server to the sandbox's
+        running gateway, propagating a tools/list_changed notification to
+        connected sessions. The server must already exist in the daemon's
+        MCP store (the client registers it first). Gated on the MCP
+        feature like the start operation.
+      tags: [Sandbox]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpGatewayAddServerRequest"
+      responses:
+        "200":
+          description: Server attached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpGatewayAddServerResponse"
+        "400":
+          description: |
+            Missing sandbox or server name, an invalid request body, or a
+            corrupt registration for the named server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not running, or server not registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: No gateway running for this sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to read the server from the MCP store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: MCP gateway not enabled on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: |
+            Live-add to the gateway failed — the control plane was
+            unreachable or a local stdio server could not be attached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Docker (image proxy) ────────────────────────────────────────────────
+  #
+  # Image references (e.g. "docker/sandbox-templates:claude-code") are passed
+  # as query parameters rather than path parameters. Path parameters that may
+  # contain slashes do not survive standard HTTP routers — Echo (and most
+  # frameworks) URL-decode the request path before route matching, so an
+  # encoded "docker%2Fsandbox-templates" becomes "docker/sandbox-templates"
+  # and fails to match a single `{name}` segment. Query parameters are
+  # routing-safe and unambiguous.
+  /docker/images:
+    get:
+      operationId: listImages
+      summary: List images
+      description: Lists template images in the sandbox runtime image store.
+      tags: [Docker]
+      responses:
+        "200":
+          description: Image list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ImageInfo"
+        "500":
+          description: Backend `ImageList` call failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /docker/images/create:
+    post:
+      operationId: pullImage
+      summary: Pull an image
+      description: |
+        Pulls an image into the sandbox runtime image store. Progress is
+        streamed as newline-delimited JSON (same format as the Moby Engine API).
+        The client can cancel the request (e.g. on Ctrl-C) to interrupt the pull.
+      tags: [Docker]
+      parameters:
+        - name: fromImage
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Image name to pull (e.g. "docker/sandbox-templates")
+        - name: tag
+          in: query
+          schema:
+            type: string
+          description: Tag to pull (e.g. "claude-code")
+        - name: X-Registry-Auth
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Optional base64url-encoded JSON of registry credentials
+            (same shape Moby uses for its image-pull endpoint). When
+            omitted, the daemon pulls anonymously — sufficient for
+            public images. Env-var-sourced credentials cannot be
+            discovered daemon-side, so clients that resolve creds
+            locally must forward them via this header.
+      responses:
+        "200":
+          description: |
+            Pull progress stream (newline-delimited JSON, same format as Moby).
+            Each line is a JSON object. Use `sandboxapi.PullImage` (hand-
+            written, returns `*http.Response` for streaming); the generated
+            `ClientWithResponses` wrapper is intentionally not emitted for
+            this endpoint to prevent eager-buffering misuse.
+          content:
+            application/x-ndjson:
+              # x-ndjson-item is a vendor extension that lets generators /
+              # tooling connect the binary body to the per-line schema.
+              # OpenAPI has no native way to declare "stream of objects",
+              # so we keep `format: binary` for transport correctness and
+              # surface the line schema separately.
+              x-ndjson-item:
+                $ref: "#/components/schemas/ImagePullProgress"
+              schema:
+                type: string
+                format: binary
+                description: |
+                  Newline-delimited JSON stream. Each line is an
+                  ImagePullProgress object (see x-ndjson-item above and
+                  ImagePullProgress in the schema components).
+        "400":
+          description: |
+            Missing or invalid `fromImage` parameter, or a malformed
+            `X-Registry-Auth` header. Returned before the NDJSON stream
+            begins.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: |
+            Registry requires authentication for the requested image, or
+            the supplied `X-Registry-Auth` credentials are missing/invalid.
+            Returned before the NDJSON stream begins so the caller can
+            re-prompt for credentials without having to parse stream
+            content. ErrorResponse.code is `registry_auth_required`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: |
+            Registry denied access to the requested image with the supplied
+            `X-Registry-Auth` credentials. Returned before the NDJSON stream
+            begins. ErrorResponse.code is `registry_access_denied`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: |
+            Registry returned not-found for the requested image on the
+            initial manifest fetch — typically a typo in `fromImage` or
+            `tag`. Returned before the NDJSON stream begins.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "408":
+          description: |
+            The client disconnected before the pull began. Returned before
+            the NDJSON stream begins.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: |
+            A pre-stream pull failure that is not auth/forbidden/not-found/
+            bad-request — e.g. a registry 5xx, pull rate limit, DNS, or TLS
+            error. Returned before the NDJSON stream begins.
+            ErrorResponse.code is `image_pull_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon backend is unavailable. Returned before any pull is
+            attempted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /docker/images/inspect:
+    get:
+      operationId: inspectImage
+      summary: Inspect an image
+      description: Returns image metadata if the image is cached locally. Returns 404 if not found.
+      tags: [Docker]
+      parameters:
+        - $ref: "#/components/parameters/ImageName"
+      responses:
+        "200":
+          description: Image info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageInfo"
+        "400":
+          description: Missing or invalid `name` parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Backend `ImageInspect` call failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /docker/images/remove:
+    delete:
+      operationId: removeImage
+      summary: Remove an image
+      tags: [Docker]
+      parameters:
+        - $ref: "#/components/parameters/ImageName"
+      responses:
+        "200":
+          description: Image removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: |
+            Missing/invalid `name`, or a bare hex prefix that matches
+            more than one image ID (ambiguous prefix).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            A bare hex prefix matched an image ID, but the same string
+            is also a tag on a different image — caller must
+            disambiguate by widening the prefix or spelling the full
+            tag. Also returned when the matched image has no removable
+            tags.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Backend `ImageRemove` call failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /docker/images/export:
+    get:
+      operationId: exportImage
+      summary: Export an image as a tar archive
+      description: |
+        Returns the image as a tar stream. The client writes this to a local
+        file. Equivalent to Moby's GET /images/{name}/get.
+
+        Use `sandboxapi.ExportImage` (hand-written, returns `*http.Response`
+        for streaming); the generated `ClientWithResponses` wrapper is
+        intentionally not emitted for this endpoint to prevent
+        eager-buffering misuse.
+      tags: [Docker]
+      parameters:
+        - $ref: "#/components/parameters/ImageName"
+      responses:
+        "200":
+          description: Image tar stream
+          content:
+            application/x-tar:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Missing or invalid `name` parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Backend `ImageSave` call failed before the tar stream began.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /docker/images/load:
+    post:
+      operationId: loadImage
+      summary: Load an image from a tar archive
+      tags: [Docker]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Image loaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "500":
+          description: |
+            Backend `ImageLoad` call failed, or the load response
+            stream could not be drained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon backend unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Policy ──────────────────────────────────────────────────────────────
+  /policy/network/setup:
+    get:
+      operationId: getNetworkPolicySetupStatus
+      summary: Check if first-run network policy setup is needed
+      tags: [Policy]
+      responses:
+        "200":
+          description: Setup status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicySetupStatusResponse"
+    post:
+      operationId: applyNetworkPolicySetup
+      summary: Apply a network policy preset
+      tags: [Policy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PolicySetupRequest"
+      responses:
+        "200":
+          description: Preset applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicySetupResponse"
+
+  /policy/network/rules:
+    get:
+      operationId: listNetworkPolicyRules
+      summary: List network policy rules
+      tags: [Policy]
+      parameters:
+        - name: sandbox
+          in: query
+          description: Filter to rules scoped to this sandbox (plus global rules)
+          schema:
+            type: string
+        - name: type
+          in: query
+          description: |
+            Filter to rules of a specific resource type. Accepted values
+            are `all`, `network`, `filesystem`, `filesystem:read`, and
+            `filesystem:write`. Omitting the parameter returns network
+            rules only; pass `all` for every resource type. Unknown
+            values return 400.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Policy rules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRulesListResponse"
+    post:
+      operationId: modifyNetworkPolicyRules
+      summary: Add, remove, or modify network policy rules
+      tags: [Policy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PolicyRulesRequest"
+      responses:
+        "200":
+          description: Results of each action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRulesResponse"
+
+  /policy/network/log:
+    get:
+      operationId: getNetworkLog
+      summary: Get recent network activity log
+      tags: [Policy]
+      responses:
+        "200":
+          description: Network log entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkLogResponse"
+
+  /policy/network/check:
+    post:
+      operationId: checkNetworkPolicy
+      summary: Evaluate a target against the network policy
+      description: |
+        Returns the policy decision for the supplied target plus the
+        rule that matched and the active governance status. Used by
+        `sbx policy check <target>` and by the daemon's own
+        diagnostics surface.
+      tags: [Policy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PolicyCheckRequest"
+      responses:
+        "200":
+          description: Decision and supporting context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyCheckResponse"
+
+  /policy/network/profiles:
+    get:
+      operationId: listNetworkPolicyProfiles
+      summary: List governance profiles known to the network policy
+      tags: [Policy]
+      responses:
+        "200":
+          description: Known profiles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyProfilesListResponse"
+
+  # ── MCP (Model Context Protocol) ─────────────────────────────────────────
+  /mcp/registration/check:
+    post:
+      operationId: checkMcpRegistration
+      summary: Evaluate an MCP server registration against governance policy
+      description: |
+        Evaluates the MCP register policy for a resolved server spec
+        against the governance-fetched policy set — the same engine that
+        gates tool invocation — so a client can reject a forbidden server
+        before persisting it. The daemon owns the fetched policy, which is
+        why the check lives here rather than in a client-side file read.
+
+        Block-list semantics apply: a registration is allowed unless an
+        explicit forbid rule fires. A denied registration is a normal
+        evaluation result (`allowed: false` with a reason), not an HTTP
+        error — mirroring POST /policy/network/check.
+      tags: [MCP]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpRegistrationCheckRequest"
+      responses:
+        "200":
+          description: Registration decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpRegistrationCheckResponse"
+        "400":
+          description: Missing spec, or an invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Registration policy evaluation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            Daemon is running degraded — the backend is not initialised.
+            Retryable once the daemon recovers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Legacy (deprecated) ──────────────────────────────────────────────────
+  /health:
+    get:
+      operationId: getLegacyHealth
+      summary: "Legacy health check (deprecated)"
+      deprecated: true
+      description: |
+        Retained for backward compatibility with old clients. New clients
+        should use GET /daemon/health instead.
+      tags: [Legacy]
+      responses:
+        "200":
+          description: Daemon is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyHealthResponse"
+
+  /version:
+    post:
+      operationId: legacyVersionCheck
+      summary: "Legacy version negotiation (deprecated)"
+      deprecated: true
+      description: |
+        Retained for backward compatibility with old clients. Old clients
+        POST their version; the daemon **always** returns "incompatible"
+        — any client still using this endpoint is by definition pre-API,
+        and the unconditional response triggers the client's
+        restart/upgrade prompt. The request body is parsed but ignored
+        (kept in the schema for backward compatibility with old client
+        deserialisers). New clients use GET /daemon/health and perform
+        version comparison locally.
+      tags: [Legacy]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VersionCheckRequest"
+      responses:
+        "200":
+          description: 'Always returns `{"result": "incompatible"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionCheckResponse"
+
+  /shutdown:
+    post:
+      operationId: legacyShutdown
+      summary: "Legacy shutdown (deprecated)"
+      deprecated: true
+      description: |
+        Retained for backward compatibility with old clients. New clients
+        should use POST /daemon/shutdown instead.
+      tags: [Legacy]
+      responses:
+        "200":
+          description: Shutdown initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShutdownResponse"
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+components:
+
+  parameters:
+    SandboxName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Sandbox name. Must start with an alphanumeric character and contain
+        only alphanumerics, `.`, `+`, or `-`. Minimum length 2. The literal
+        string "default" is reserved.
+      schema:
+        type: string
+        minLength: 2
+        maxLength: 64
+        pattern: "^[A-Za-z0-9][A-Za-z0-9.+\\-]+$"
+
+    ImageName:
+      name: name
+      in: query
+      required: true
+      description: >-
+        Image reference (name, name:tag, or ID). Passed as a query parameter
+        rather than a path segment because image references commonly contain
+        slashes (e.g. "docker/sandbox-templates:claude-code") which do not
+        round-trip cleanly through HTTP path routing.
+      schema:
+        type: string
+
+  schemas:
+
+    # ── Bootstrap ──────────────────────────────────────────────────────────
+    HealthResponse:
+      type: object
+      required: [status, version, release]
+      properties:
+        status:
+          type: string
+          example: healthy
+        version:
+          type: string
+          description: Daemon build version
+          example: v0.27.0
+        release:
+          type: boolean
+        api_version:
+          type: string
+          description: |
+            Semver API version matching the OpenAPI spec version (see
+            `info.version` for the current value). Absent on old daemons.
+            Clients should compare major versions for compatibility:
+            same major = compatible, different major = incompatible.
+          example: "1.2.3"
+        revision:
+          type: string
+          description: Daemon build git revision
+          example: 4eb820e28d71717be6fc609cc5f1252e1148a9e7
+        runtime:
+          $ref: "#/components/schemas/RuntimeVersions"
+
+    RuntimeVersions:
+      type: object
+      description: |
+        Versions of the daemon's runtime components. Each component
+        carries a `_version` and `_commit` so callers don't have to
+        special-case the shape — fields are optional because not every
+        runtime exposes both.
+      properties:
+        docker_next_version:
+          type: string
+          example: v0.1.0-beta.47
+        docker_next_commit:
+          type: string
+          example: 868bb12eee018c5c6c40a63097ed2f8e0773eb6e
+        shim_version:
+          type: string
+          description: nerdbox shim version
+          example: v0.1.0-alpha.internal.28
+        vmm_commit:
+          type: string
+          description: VMM (sailor) commit
+          example: a7fdcec5d99fc7c5756d8c464e41748e4963295a
+
+    LegacyHealthResponse:
+      type: object
+      required: [status, version, release]
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        release:
+          type: boolean
+
+    VersionCheckRequest:
+      type: object
+      properties:
+        version:
+          type: string
+        release:
+          type: boolean
+
+    VersionCheckResponse:
+      type: object
+      required: [result]
+      properties:
+        result:
+          type: string
+          enum: [compatible, incompatible, development]
+
+    # ── Common ─────────────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable error message.
+        code:
+          type: string
+          description: |
+            Stable machine-readable error code (e.g. "sandbox_not_found",
+            "image_pull_failed"). Optional today; reserved so clients can
+            switch on a typed identifier rather than parsing message text
+            or matching HTTP status codes once we start populating it.
+        port_replay_conflict:
+          $ref: "#/components/schemas/PortReplayConflict"
+
+    PortReplayConflict:
+      type: object
+      description: |
+        Details for a `port_replay_conflict` error returned by
+        `POST /sandbox/{name}/start`. Sandboxes remember published-port
+        requests so they can be restored after the sandbox stops or the
+        daemon restarts. When a remembered request used an explicit host
+        port and that port is already in use during start, sandboxd leaves
+        the sandbox stopped and returns this payload so clients can offer
+        to replace the saved desired mapping with a different host port
+        before retrying `startSandbox`.
+      required: [request_index, host_port, sandbox_port, protocol]
+      properties:
+        request_index:
+          type: integer
+          minimum: 0
+          description: Index of the persisted publish request that failed during start replay.
+        host_ip:
+          type: string
+          description: Host IP from the persisted publish request. Empty means the default loopback bindings.
+        host_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Explicit host port that could not be rebound.
+        sandbox_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Sandbox port the host port maps to.
+        protocol:
+          type: string
+          description: Protocol from the persisted publish request.
+
+    MessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable message describing the operation outcome.
+
+    LogLevelMap:
+      type: object
+      description: |
+        Map of category name to current log-level threshold. Keys are
+        category names (e.g. `proxy`, `general`); values are level strings
+        accepted by `LogLevelRequest`. Empty when the daemon was built
+        without the per-component log-level registry wired up.
+      additionalProperties:
+        type: string
+        enum: [debug, info, warn, error]
+
+    LogLevelRequest:
+      type: object
+      required: [level]
+      properties:
+        level:
+          type: string
+          description: Threshold to apply to the target category.
+          enum: [debug, info, warn, error]
+
+    DaemonInfo:
+      type: object
+      required: [api_socket]
+      properties:
+        api_socket:
+          type: string
+          description: Path to the sandboxd API socket
+        docker_socket:
+          type: string
+          deprecated: true
+          description: |
+            Path to the docker backend socket (shared by all sandboxes).
+            DEPRECATED: clients should not depend on direct access to this
+            socket; it may be made internal to sandboxd in a future release.
+            Use the sandboxd API endpoints instead
+            (e.g. /sandbox/{name}/exec, /sandbox/{name}/files).
+
+    DaemonDiagnostics:
+      type: object
+      required: [info, socket_paths]
+      properties:
+        info:
+          type: object
+          additionalProperties: true
+          description: |
+            Diagnostic snapshot returned by docker-next
+            libdocker.Server.Diagnostics (pkg/diag.Info). The embedder's
+            redactor has already been applied. Modeled as `additionalProperties: true` here so this schema does not need to track docker-next's struct evolution.
+
+            Canonical schema lives in docker-next:
+              - RFC: https://github.com/docker/docker-next/blob/main/rfc/013-diagnostics-api.md
+              - Go type: https://github.com/docker/docker-next/blob/main/pkg/diag/diag.go (type `Info`)
+
+            Top-level keys (RFC 013, schema_version=1):
+              - SchemaVersion (int) — bumped on breaking changes.
+              - CapturedAt (RFC 3339 timestamp, UTC) — when the snapshot was taken.
+              - Version (object) — build identity: GitSHA, BuildDate, Semver. Empty in unstamped dev builds.
+              - GoRuntime (string) — e.g. `go1.24.1`.
+              - NerdboxID (string) — containerd runtime ID, e.g. `io.containerd.nerdbox.v1`.
+              - Host (object) — OS, Arch, NumCPU, OSVersion (redacted), Memory{TotalBytes, AvailableBytes}.
+              - Process (object) — Self{PID, RSSBytes}, Shims{Count, TotalRSSBytes}, NumGoroutine, UptimeSec.
+              - State (object) — Sandboxes{Total, Running, TotalCPUsAllocated, TotalMemoryMiBAllocated}, Images{Count, TotalBytes}. Aggregate counts only — zero PII.
+              - ContainerdConfig (object) — Version, Root (redacted), State (redacted), DisabledPlugins, RequiredPlugins, Plugins (every string value recursively redacted), Timeouts (keys + values redacted).
+              - Goroutines (array of strings) — one entry per goroutine from runtime.Stack(all=true), redacted. Splitting per-goroutine (rather than emitting a single newline-joined string) keeps the bundle's runtime-diag.json readable when a support reader opens it in jq. Build paths in file:line frames stripped via -trimpath.
+
+            Consumers that need typed access should unmarshal the JSON into docker-next's `diag.Info` Go type directly — JSON tags match the field names listed above.
+        partial_error:
+          type: string
+          description: |
+            Aggregated non-fatal sub-collector error messages, joined by
+            newline (`\n`). Omitted when the snapshot is complete.
+            Callers should still serialize info regardless of this field —
+            a partial snapshot is more useful than no snapshot.
+        socket_paths:
+          $ref: "#/components/schemas/SocketPathInfo"
+
+    SocketPathInfo:
+      type: object
+      required: [sun_path_limit_bytes]
+      properties:
+        sun_path_limit_bytes:
+          type: integer
+          description: |
+            Kernel AF_UNIX sockaddr_un.sun_path limit on this platform
+            (104 on macOS, 108 on Linux and Windows; 0 on other
+            platforms). Windows reports 108 because sandboxd still binds
+            an AF_UNIX-style containerd TTRPC socket there
+            (`shortenStateDirIfNeeded` enforces this budget at daemon
+            startup). Compare each *_bytes field below against
+            (limit - 1) to spot an imminent ENAMETOOLONG on bind/connect.
+        state_dir_bytes:
+          type: integer
+          description: |
+            Canonical byte length of the daemon's state directory
+            (`storagepaths.ResolveStateDir`). All sandboxd-managed
+            socket paths derive from this; longer values reduce the
+            margin every shim socket has under the sun_path limit.
+        gvisor_socket_dir_primary_bytes:
+          type: integer
+          description: |
+            Canonical byte length of the *primary* gvisor per-endpoint
+            socket directory candidate (`~/.sbx/run` plus any --app-name
+            suffix), regardless of whether the daemon actually chose it.
+            Highest-risk field: macOS expands /Users → /private/Users
+            (+8 bytes), which has silently pushed long-username
+            deployments past the limit in the past. Compare against
+            `gvisor_socket_dir_chosen_bytes`: when they differ, the
+            daemon fell back to the temp dir because the primary
+            blew the sun_path budget at startup.
+        gvisor_socket_dir_chosen_bytes:
+          type: integer
+          description: |
+            Canonical byte length of the gvisor per-endpoint socket
+            directory actually configured on the running docker-next
+            server. The daemon picks between the primary candidate
+            (`~/.sbx/run`) and the `os.TempDir()/gvisor` fallback at
+            startup based on which fits the sun_path budget
+            (`resolveGvisorRootDir` in sandboxd/daemon.go). Omitted
+            when docker-next has not been configured yet (e.g. the
+            partial-error path where `info` is empty).
+        containerd_ttrpc_bytes:
+          type: integer
+          description: |
+            Canonical byte length of containerd's TTRPC socket
+            (<stateDir>/containerd/containerd.sock.ttrpc). Checked at
+            daemon startup by shortenStateDirIfNeeded; first thing to
+            trip on long paths.
+        username_bytes:
+          type: integer
+          description: |
+            Byte length (not rune count) of os/user.Current().Username
+            with USER / USERNAME / LOGNAME fallback. Multibyte usernames
+            consume more sun_path bytes than their visible character
+            count suggests.
+
+    DebugStateResponse:
+      type: object
+      required: [daemon_version, daemon_uptime_seconds, sandboxes, stored_secrets, docker, drift]
+      description: Read-only debug snapshot of daemon internal state. Never contains secret values.
+      properties:
+        daemon_version:
+          type: string
+          description: Daemon build version string.
+        daemon_uptime_seconds:
+          type: number
+          format: double
+          description: Seconds since the daemon process started (best-effort).
+        sandboxes:
+          type: array
+          description: Per-sandbox runtime state, including the secrets injected into each.
+          items:
+            $ref: "#/components/schemas/SandboxDebug"
+        stored_secrets:
+          $ref: "#/components/schemas/StoredSecretsDebug"
+        docker:
+          $ref: "#/components/schemas/DockerScanDebug"
+        drift:
+          $ref: "#/components/schemas/DriftReport"
+
+    StoredSecretsDebug:
+      type: object
+      required: [oauth_token_managers, credentials, custom_secrets]
+      description: >-
+        Read-only view of what is persisted in the host credential store
+        (keychain or encrypted file). Presence/identity only — never contains
+        secret values.
+      properties:
+        oauth_token_managers:
+          type: array
+          description: Registry-level OAuth token managers (presence-only, no token material).
+          items:
+            $ref: "#/components/schemas/TokenManagerDebug"
+        credentials:
+          type: array
+          description: Stored service credentials, identified by scope and service only (no values).
+          items:
+            $ref: "#/components/schemas/StoredCredentialDebug"
+        custom_secrets:
+          type: array
+          description: >-
+            Stored custom secrets, identified by scope and sentinel only. Target
+            and env-var metadata live in the encrypted payload and are not
+            reported here to avoid decrypting.
+          items:
+            $ref: "#/components/schemas/StoredCustomSecretDebug"
+
+    StoredCredentialDebug:
+      type: object
+      required: [scope, service]
+      description: Identity of a stored service credential. Carries no value.
+      properties:
+        scope:
+          type: string
+          description: Sandbox name, or "_" for the global/default scope.
+        service:
+          type: string
+          description: External service the credential targets (e.g. github, anthropic).
+
+    StoredCustomSecretDebug:
+      type: object
+      required: [scope, sentinel]
+      description: Identity of a stored custom secret. Carries no value.
+      properties:
+        scope:
+          type: string
+          description: Sandbox name, or "_" for the global/default scope.
+        sentinel:
+          type: string
+          description: Placeholder key (not secret material).
+
+    SandboxDebug:
+      type: object
+      required: [name, id, agent_name, network_name, oauth, has_proxy_state, published_port_count, session_count, mcp_gateway_present, secrets, custom_secrets]
+      properties:
+        name:
+          type: string
+          description: Runtime (sandbox) name.
+        id:
+          type: string
+          description: Daemon-assigned runtime UUID.
+        agent_name:
+          type: string
+          description: Coding agent running in this runtime.
+        network_name:
+          type: string
+          description: Sanitized Docker (gvisor) network name for this runtime.
+        image:
+          type: string
+          description: >-
+            Image reference that the sandbox's backing container is running,
+            e.g. "docker/sandbox-templates-claude-code:0.0.1". Sourced from the
+            Docker container scan and omitted when the container can't be
+            matched (e.g. the container is absent).
+        image_digest:
+          type: string
+          description: >-
+            Content digest of the running image (e.g. "sha256:..."), as
+            reported by the Docker daemon. Omitted when the backing container
+            can't be matched.
+        oauth:
+          $ref: "#/components/schemas/OAuthDebugInfo"
+        proxy_addr:
+          type: string
+          description: Local address the runtime's network proxy is listening on, if a proxy is wired.
+        has_proxy_state:
+          type: boolean
+          description: Whether sandboxd is tracking proxy state for this runtime.
+        published_port_count:
+          type: integer
+          description: Number of host ports currently published for this runtime.
+        session_count:
+          type: integer
+          description: Active sentinel session count (drives auto-stop).
+        dispatch_cache_version:
+          type: string
+          description: Cache fingerprint at the last dispatcher invocation, if any.
+        mcp_gateway_present:
+          type: boolean
+          description: Whether an MCP gateway is active for this runtime.
+        auth_mode:
+          type: string
+          enum: [api_key, oauth, none]
+          description: >-
+            Credential the proxy's OAuth engine would actually inject for the
+            agent's service right now, distinct from oauth.configured (which
+            only reports that interception is wired). A per-VM API key takes
+            precedence over the OAuth token, so a configured OAuth interceptor
+            can still report auth_mode=api_key. Omitted when no OAuth-capable
+            interceptor is wired for the runtime. Presence-only and
+            non-mutating — it never triggers a token refresh.
+        secrets:
+          type: array
+          description: Secrets injected into this sandbox (classification-only, no values).
+          items:
+            $ref: "#/components/schemas/SecretDebugEntry"
+        custom_secrets:
+          type: array
+          description: Custom placeholder->secret mappings injected into this sandbox (classification-only, no values).
+          items:
+            $ref: "#/components/schemas/CustomSecretDebugEntry"
+        network_policy:
+          $ref: "#/components/schemas/NetworkPolicyDebug"
+        mount_policy_denied:
+          type: boolean
+          description: >-
+            True when this sandbox's workspace mounts are currently denied by
+            mount policy (e.g. an organization admin blocked a path the sandbox
+            uses). The sandbox is kept visible and removable but cannot be
+            started until the policy allows the path again. Evaluated at daemon
+            load and cleared on a successful start, so it reflects policy as of
+            the last daemon start / start attempt. Absent/false in the common
+            case.
+
+    NetworkPolicyDebug:
+      type: object
+      required: [scope]
+      description: >-
+        Which network policy governs this sandbox. `scope` reflects whether a
+        sandbox-scoped override applies on top of the global policy;
+        `organization`/`organization_unavailable` describe the underlying global
+        policy's governance. Omitted when the policy dimensions can't be
+        resolved — either because no policy manager is wired / the default
+        policy has not been configured yet, or because a transient
+        policy-manager failure (e.g. an error listing policies) prevented
+        resolution. Clients should treat omission as "unknown/undetermined"
+        rather than strictly "not configured".
+      properties:
+        scope:
+          type: string
+          enum: [global, sandbox]
+          description: >-
+            global = governed by the global policy only; sandbox = a
+            sandbox-scoped override applies on top of the global policy.
+        organization:
+          type: string
+          description: >-
+            Organization managing the global policy, when org-managed. Omitted
+            for local-only policy.
+        organization_unavailable:
+          type: boolean
+          description: >-
+            True when the active-organization lookup failed: governance is in
+            play but the organization name could not be resolved.
+
+    OAuthDebugInfo:
+      type: object
+      required: [configured]
+      description: Presence-only view of a proxy's OAuth interception state.
+      properties:
+        configured:
+          type: boolean
+          description: >-
+            True when per-runtime OAuth interception is wired (OAuthConfig and
+            TokenManager both present). This reports only that the interceptor
+            exists, not that OAuth is the credential in effect — see
+            SandboxDebug.auth_mode for the latter.
+        service:
+          type: string
+          description: OAuth service the interceptor targets (e.g. anthropic, openai).
+
+    TokenManagerDebug:
+      type: object
+      required: [service, has_access_token, has_refresh_token, has_id_token, has_client_id, has_client_secret, scopes_present, expired]
+      description: Presence-only view of an OAuth token manager. Carries no token material.
+      properties:
+        service:
+          type: string
+        has_access_token:
+          type: boolean
+        has_refresh_token:
+          type: boolean
+        has_id_token:
+          type: boolean
+        has_client_id:
+          type: boolean
+        has_client_secret:
+          type: boolean
+        scopes_present:
+          type: boolean
+        expires_at:
+          type: string
+          description: RFC3339 expiry; omitted when no expiry is set.
+        expired:
+          type: boolean
+
+    SecretDebugEntry:
+      type: object
+      required: [service, source_type, class, revoked, value]
+      description: A single injected service credential, classification-only.
+      properties:
+        service:
+          type: string
+        source_type:
+          type: string
+          description: One of "uploaded", "env", "file", or "".
+        env_var_name:
+          type: string
+          description: Environment variable name for env-backed sources only. File paths are never reported.
+        class:
+          type: string
+          description: Value classification — populated, empty, whitespace, or unknown.
+        revoked:
+          type: boolean
+        value:
+          type: string
+          description: Always the censored placeholder "***".
+
+    CustomSecretDebugEntry:
+      type: object
+      required: [targets, env_name, sentinel, class, value]
+      description: A custom placeholder->secret mapping, classification-only.
+      properties:
+        targets:
+          type: array
+          items:
+            type: string
+          description: Host patterns for this secret (injection keys, not secret material).
+        env_name:
+          type: string
+        sentinel:
+          type: string
+          description: Placeholder key (not secret material).
+        class:
+          type: string
+          description: Value classification — populated, empty, or whitespace.
+        value:
+          type: string
+          description: Always the censored placeholder "***".
+
+    DockerScanDebug:
+      type: object
+      required: [containers, networks]
+      description: Scan of all containers and networks on the Docker daemon.
+      properties:
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/DockerContainerDebug"
+        networks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DockerNetworkDebug"
+
+    DockerContainerDebug:
+      type: object
+      required: [id, name, tracked]
+      properties:
+        id:
+          type: string
+          description: Docker container ID.
+        name:
+          type: string
+        created:
+          type: string
+          format: date-time
+          description: Container creation time (RFC 3339), omitted when Docker does not report it.
+        tracked:
+          type: boolean
+          description: Whether sandboxd has a runtime tracking this container.
+
+    DockerNetworkDebug:
+      type: object
+      required: [id, name, driver, sandbox_managed]
+      properties:
+        id:
+          type: string
+          description: Docker network ID.
+        name:
+          type: string
+        driver:
+          type: string
+        created:
+          type: string
+          format: date-time
+          description: Network creation time (RFC 3339), omitted when Docker does not report it.
+        sandbox_managed:
+          type: boolean
+          description: Whether this is a sandbox-managed (gvisor-driver) network.
+
+    DriftReport:
+      type: object
+      required: [networks_without_runtime, runtimes_without_network, containers_not_tracked]
+      description: Cross-reference of in-memory runtimes against Docker daemon state.
+      properties:
+        networks_without_runtime:
+          type: array
+          description: gvisor networks with no corresponding tracked runtime (orphans).
+          items:
+            type: string
+        runtimes_without_network:
+          type: array
+          description: Tracked runtimes with no matching gvisor network.
+          items:
+            type: string
+        containers_not_tracked:
+          type: array
+          description: Containers not tracked by any sandboxd runtime.
+          items:
+            type: string
+
+    ShutdownResponse:
+      type: object
+      required: [pid]
+      properties:
+        message:
+          type: string
+        pid:
+          type: integer
+          description: PID of the daemon process (which is shutting down). The client can wait for this process to exit before proceeding.
+
+    # ── Sandbox ────────────────────────────────────────────────────────────
+    WorkspaceMount:
+      type: object
+      required: [dir]
+      properties:
+        dir:
+          type: string
+          description: Absolute path on the host
+        read_only:
+          type: boolean
+          default: false
+
+    CredentialValue:
+      type: object
+      required: [service, value]
+      properties:
+        service:
+          type: string
+          description: Service name (e.g. "anthropic", "openai")
+        value:
+          type: string
+          description: Credential value (API key, token)
+
+    SandboxCreateRequest:
+      type: object
+      required: [agent, workspace]
+      properties:
+        agent:
+          type: string
+          description: Agent type (e.g. "claude", "codex", "cursor")
+        workspace:
+          type: string
+          description: Absolute path to the primary workspace on the host
+        name:
+          type: string
+          description: Sandbox name (auto-generated if omitted)
+        template:
+          type: string
+          description: Template image reference (agent default if omitted)
+        additional_workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceMount"
+          description: |
+            Additional workspace directories mounted alongside the
+            primary workspace. Same name as SandboxInfo.additional_workspaces
+            on the response side.
+        clone:
+          type: boolean
+          default: false
+          description: |
+            When true, runs the agent on a private in-container clone
+            of the host Git repository instead of bind-mounting the
+            workspace directly. The host repository is mounted
+            read-only at `/run/sandbox/source` inside the sandbox; the
+            agent's commits live in the clone and are accessible via
+            the `sandbox-<name>` Git remote configured on the host
+            repo. The daemon detects the Git root from `workspace` at
+            create time, and returns 400 when:
+              - `workspace` is not inside a Git repository,
+              - the resolved root is itself a Git worktree (the
+                in-container `git clone --reference` cannot follow a
+                worktree's `.git` pointer through the read-only mount),
+              - the root's `.git` is not a real directory (submodule or
+                `--separate-git-dir` setups).
+            The resulting sandbox is surfaced via
+            `SandboxInfo.source_repo_dir` (the host Git root) and the
+            `com.docker.sandbox.cloneMode` container label.
+        pull_policy:
+          type: string
+          enum: [always, missing, never]
+          default: always
+          description: |
+            Image pull policy:
+            - "always": pull before creating (default)
+            - "missing": skip if image exists locally
+            - "never": fail if image not local
+        memory:
+          type: string
+          description: "Memory limit (e.g. \"8g\")"
+        cpus:
+          type: integer
+          minimum: 0
+          description: |
+            CPU limit, in whole CPUs. 0 (the default) means auto: the daemon
+            allocates all host CPUs (runtime.NumCPU()).
+            Fractional CPU shares are not supported — use a whole number.
+        kits:
+          type: array
+          items:
+            type: string
+          description: |
+            Kit paths or names to compose into the sandbox. Currently
+            rejected by the daemon — the daemon cannot resolve refs
+            on its own (no OCI pull, no git clone, no filesystem
+            access outside its state dir). Clients that resolved
+            their kits locally should ship the parsed content via
+            `kit_artifacts` instead. Kept on the wire for the
+            in-flight CLI/TUI eligibility check that routes
+            kit-bearing requests to the legacy create path.
+        kit_artifacts:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: |
+            Composed kit content shipped inline by clients that
+            resolved `--kit` references locally. Each entry is the
+            JSON-marshalled form of a `sandboxlib/kit.Artifact` (which
+            embeds `spec.Artifact` from `docker/sbx-kits-contrib`).
+            The daemon `json.Unmarshal`s each entry back into
+            `kit.Artifact`, runs `kit.Compose` against the base agent
+            resolved from `agent`, and applies the resulting
+            customizers (file copies, install / startup commands,
+            network policy, credential sources, mounts, env vars).
+
+            The daemon does not resolve kit references on its own —
+            the client carries the resolved content. The free-form
+            object shape mirrors the source struct's JSON tags; both
+            sides round-trip through `encoding/json`.
+        credential_values:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialValue"
+          description: |
+            Environment-based credential values from the client's shell.
+            The daemon cannot access shell env vars, so the client reads
+            them and passes the values here.
+        bindings_path:
+          type: string
+          description: |
+            Absolute path to the user's credentials.yaml (the client's
+            resolved config-home location, e.g. $XDG_CONFIG_HOME/sbx/
+            credentials.yaml). The daemon reads binding authorization from
+            this file to decide which v2 credentials it may inject; it does
+            NOT fall back to its own process environment, which may differ
+            from the user's. Local-deployment only — a future cloud/multi-
+            tenant path replaces this with a verified authorization token.
+        secrets_scope:
+          type: string
+          description: Scope for credential store lookups
+        profile:
+          type: string
+          description: |
+            Name of the policy profile to assign to this sandbox. The
+            daemon's governance layer reads the profile when evaluating
+            mount and network rules; empty (the common case) selects
+            the default profile. Surfaced on responses as
+            SandboxInfo.profile.
+        detached:
+          type: boolean
+          default: false
+          description: |
+            When true, the sandbox runs in detached mode: the daemon
+            skips auto-stop on the last sentinel disconnect, so the
+            sandbox keeps running after the `sbx run -d ...` invocation
+            exits. The user is responsible for stopping it (sbx stop /
+            sbx rm). Matches the legacy Spec.Detached semantics.
+        dind_volume_size:
+          type: string
+          description: |
+            Human-friendly size string for a DinD sandbox's
+            /var/lib/docker block-backed volume (e.g. "10g", "512m").
+            Empty selects the underlying default (~50 GB). The CLI
+            reads DOCKER_SANDBOXES_DOCKER_SIZE from the user's shell
+            env and passes the value through on this field — the daemon's
+            process env doesn't see the CLI's env.
+        enable_virtiofs_cache:
+          type: boolean
+          default: false
+          description: |
+            When true, opts this sandbox into virtiofs caching for its
+            bind-mounted workspace paths. Disabled by default while the
+            underlying feature is still rolling out. The CLI reads
+            DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE=1 from the user's
+            shell env and passes the resulting boolean here — the
+            daemon's process env doesn't see the CLI's env.
+        display:
+          type: boolean
+          default: false
+          description: |
+            Experimental. When true, the daemon stamps
+            com.docker.sandbox.display=wayland on the container at create
+            time; docker-next ≥ v0.6.0 reads that label and provisions a
+            wayland display socket inside the sandbox.
+
+            Default false. This is a host-capability exposure (each
+            display-enabled sandbox can draw windows on the host
+            compositor and could spoof UI), so opt-in is per-sandbox via
+            the CLI's `--display` flag, not a global setting.
+        environment:
+          type: object
+          additionalProperties:
+            type: string
+          description: "Additional environment variables (TERM, TZ, etc.)"
+        agent_options:
+          type: object
+          additionalProperties:
+            type: object
+          description: |
+            Agent-specific options, keyed by agent name. Each agent —
+            built-in or installed via a kit — defines its own option
+            schema; the daemon consults `agent_options[<agent>]` where
+            `<agent>` matches this request's `agent` field, and ignores
+            entries for any other agent.
+
+            Strictness: the daemon is lenient. Entries whose key
+            doesn't match the request's `agent` are silently dropped.
+            Unknown keys *within* the matching agent's bag are also
+            ignored — kit-installed agents own their own validation,
+            and the daemon can't statically enumerate their options.
+            Real bugs (typos in option keys) surface as the option
+            having no effect. A server-side options-schema endpoint
+            (`GET /daemon/agents`) is deferred — the daemon resolves
+            built-in agents from its embedded blueprint registry and
+            kit-supplied options are validated by the kit author's
+            agent implementation.
+
+            Built-in option keys today:
+              claude:
+                patch_settings (boolean) — intercept Claude API
+                  responses to remove `disableBypassPermissionsMode`.
+
+            Agents installed via kits may define additional keys; see
+            the kit's documentation.
+
+    SandboxCreateResponse:
+      type: object
+      required: [name, agent, workspace, status]
+      properties:
+        name:
+          type: string
+        agent:
+          type: string
+        workspace:
+          type: string
+          description: |
+            Effective workspace path mounted into the sandbox. When the
+            sandbox is backed by a git worktree, this is the worktree
+            path; otherwise it's the directory the user supplied. The
+            user-supplied directory in the worktree case is reported via
+            `worktree.original_workspace`.
+        status:
+          type: string
+          enum: [running, stopped]
+        worktree:
+          $ref: "#/components/schemas/SandboxWorktree"
+        warnings:
+          type: array
+          items:
+            type: string
+        withheld:
+          type: array
+          items:
+            type: string
+          description: |
+            Service identifiers whose v2 credential the daemon withheld
+            because no binding authorized it (the credential was not
+            injected; the sandbox still started). Service names only — no
+            values, paths, or domains. Empty/omitted when nothing was
+            withheld.
+
+    SandboxInfo:
+      type: object
+      required: [name, id, status, workspace]
+      properties:
+        name:
+          type: string
+        id:
+          type: string
+          description: |
+            Daemon-assigned runtime identifier (a UUID), stable across
+            daemon restarts. Returned in `sbx ls --json`; the human
+            `sbx ls` table does not show an ID column for local sandboxes.
+            Empty only for legacy runtimes persisted before the daemon
+            assigned UUIDs, or from a daemon that predates this field.
+            Distinct from the cloud `sbx_*` sandbox ID, which the cloud
+            list path carries out-of-band rather than through this local
+            wire type.
+        agent:
+          type: string
+        profile:
+          type: string
+          description: |
+            Name of the policy profile the sandbox was created with.
+            Empty when the sandbox doesn't reference a policy profile
+            (the common case). Surfaced in `sbx ls --show-profiles`
+            and similar UX; not used for any wire-level routing.
+        status:
+          type: string
+          enum: [running, stopped]
+        mount_policy_denied:
+          type: boolean
+          description: |
+            True when the sandbox's workspace mounts are currently denied by
+            mount policy (e.g. an organization admin blocked a path the
+            sandbox uses). The sandbox is kept visible in `sbx ls` and is
+            removable via `sbx rm`, but cannot be started until the policy
+            allows the path again. Absent/false in the common case. Evaluated
+            at daemon load and cleared on a successful start, so it reflects
+            policy as of the last daemon start / start attempt rather than
+            being re-evaluated on every list.
+        workspace:
+          type: string
+          description: |
+            Effective workspace path mounted into the sandbox. Same
+            semantics as `SandboxCreateResponse.workspace` — equals the
+            worktree path when worktree-backed, the user-supplied
+            directory otherwise.
+        additional_workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceMount"
+        created_at:
+          type: string
+          format: date-time
+        ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublishedPort"
+        worktree:
+          $ref: "#/components/schemas/SandboxWorktree"
+        source_repo_dir:
+          type: string
+          description: |
+            Host Git root bind-mounted read-only into the sandbox at
+            `/run/sandbox/source` for clone-mode sandboxes (`--clone`).
+            Empty/absent for direct-mount and legacy worktree sandboxes.
+            Presence is the canonical wire-level signal that the
+            sandbox runs on an in-container `git clone --reference`
+            and that removing it discards any uncommitted/unpushed
+            in-container Git state (see `LabelKeyCloneMode`).
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Container labels recorded at create time
+            (`com.docker.sandbox.*` plus anything else the user or a
+            kit added). Carries the runtime metadata callers need to
+            determine workspace path, worktree mode, clone-mode flag,
+            git root, original workspace, and display surface without
+            inspecting the container directly. Individual keys may be
+            absent on older sandboxes whose labels predate them —
+            callers should tolerate missing keys rather than assume
+            every key is always populated.
+
+    SandboxWorktree:
+      type: object
+      required: [branch, original_workspace]
+      description: |
+        Legacy metadata about a host-side git worktree backing a
+        sandbox. The CLI's `--branch` flag (which created host-side
+        worktrees) has been removed in favour of `--clone` (in-container
+        clone, signalled via `SandboxInfo.source_repo_dir`). This field
+        is populated only for sandboxes created by older CLI versions
+        and is not produced by new sandboxes — it is retained on
+        `SandboxInfo` / `SandboxCreateResponse` so inspecting a
+        legacy worktree-backed sandbox still works.
+      properties:
+        branch:
+          type: string
+          description: Branch the worktree was created on.
+        original_workspace:
+          type: string
+          description: |
+            The user's actual workspace directory. The path at the
+            sibling `workspace` field is the worktree mount; this field
+            points back to the underlying directory the worktree
+            represents.
+
+    ResetResponse:
+      type: object
+      required: [sandboxes_stopped, pid]
+      properties:
+        sandboxes_stopped:
+          type: array
+          items:
+            type: string
+          description: |
+            Names of sandboxes the daemon attempted to stop and remove (best
+            effort). The daemon performs each step of per-sandbox cleanup
+            individually, logging and continuing on errors, so a name appearing
+            here means the runtime was removed from the daemon's in-memory
+            registry — it does not guarantee every sub-step succeeded.
+        pid:
+          type: integer
+          description: PID of the daemon process (which is shutting down). The client can wait for this process to exit before proceeding.
+
+    SyncCredentialsRequest:
+      type: object
+      properties:
+        credential_values:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialValue"
+        custom_secrets:
+          type: array
+          description: |
+            Custom secret mappings to install on the sandbox. The daemon
+            keeps the value for target-bound replacement in the proxy;
+            the sandbox process only ever sees `env_name=sentinel` so
+            the secret value never reaches the container.
+
+            Sentinels must be non-empty and unique within the request —
+            duplicates and empty values are rejected with 400.
+          items:
+            $ref: "#/components/schemas/CustomSecretValue"
+        bindings_path:
+          type: string
+          description: |
+            Absolute path to the user's credentials.yaml (the client's
+            resolved config-home location, e.g. $XDG_CONFIG_HOME/sbx/
+            credentials.yaml). The daemon reads binding authorization from
+            this file to decide which v2 credentials it may inject; it does
+            NOT fall back to its own process environment, which may differ
+            from the user's. Local-deployment only — a future cloud/multi-
+            tenant path replaces this with a verified authorization token.
+
+    SyncCredentialsResult:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable message describing the operation outcome.
+        withheld:
+          type: array
+          items:
+            type: string
+          description: |
+            Service identifiers whose v2 credential the daemon withheld at
+            sync because no binding authorized it. Service names only — no
+            values, paths, or domains. Empty/omitted when nothing was withheld.
+
+    CustomSecretValue:
+      type: object
+      required: [env_name, sentinel, value]
+      properties:
+        targets:
+          type: array
+          items:
+            type: string
+          description: |
+            Host patterns the proxy matches against outgoing requests before
+            performing the sentinel-to-value replacement. Multiple entries
+            allow one secret to cover unrelated domains that share the same
+            key. An empty array means the secret matches every host.
+            Supersedes `target` when non-empty.
+        target:
+          type: string
+          description: |
+            Deprecated — use `targets` instead. Retained for backward
+            compatibility with older clients. The proxy treats a non-empty
+            `target` as equivalent to `targets: [target]` when `targets`
+            is absent.
+        env_name:
+          type: string
+          description: Name of the environment variable the sandbox sees.
+        sentinel:
+          type: string
+          description: |
+            Daemon-side identifier the proxy looks for in request bodies
+            and headers; replaced with the corresponding `value` before
+            the request leaves the host. Non-empty and unique per
+            request body.
+        value:
+          type: string
+          description: |
+            Real secret value the proxy substitutes for the sentinel.
+            Never visible to the sandboxed process — only the proxy and
+            the daemon's secrets store hold it.
+        kind:
+          type: string
+          description: |
+            Optional dynamic resolution kind. Empty/literal means `value`
+            is the real secret; `ref` and `command` resolve `source` before
+            replacement.
+        source:
+          type: string
+          description: Reference URI or shell command for dynamic custom secrets.
+        refresh:
+          type: string
+          description: |
+            Dynamic resolution policy: empty is treated as `on-demand` for
+            legacy records, `on-demand` resolves every matched request, or a
+            duration string such as `55m`.
+        backend:
+          type: string
+          description: Resolver backend for ref custom secrets.
+        resolver_env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Provider-owned environment captured when a ref custom secret is
+            stored, used later by daemon-side built-in reference resolvers.
+            Clients must send only allowlisted resolver selectors/config values,
+            such as AWS_PROFILE or OP_ACCOUNT, never arbitrary process env or raw
+            credential variables.
+
+    # ── Kits ───────────────────────────────────────────────────────────────
+    AddKitRequest:
+      type: object
+      required: [kit_artifact]
+      properties:
+        kit_artifact:
+          type: object
+          additionalProperties: true
+          description: |
+            Parsed kit content shipped inline by the client. Mirrors
+            the `kit_artifacts` shape on `SandboxCreateRequest` — the
+            JSON-marshalled form of a `sandboxlib/kit.Artifact` (which
+            embeds `spec.Artifact` from `docker/sbx-kits-contrib`). The
+            client resolves the `--kit` reference locally (OCI, git,
+            ZIP, or path) and ships the parsed artifact here; the
+            daemon `json.Unmarshal`s it back into `kit.Artifact` and
+            applies it to the running container.
+
+            Same rationale as create-time `kit_artifacts`: the daemon
+            doesn't carry registry / git credentials and shouldn't
+            stat host filesystem paths outside its state directory,
+            so reference resolution stays client-side.
+
+            Agent-type kits (`kind: sandbox`) are rejected with 400 —
+            runtime injection cannot replace the agent, change
+            security settings, or alter container mounts. Those
+            require sandbox recreation (see the `kit_artifacts` field
+            on `SandboxCreateRequest`).
+
+    # ── Exec ───────────────────────────────────────────────────────────────
+    ExecRequest:
+      type: object
+      required: [cmd]
+      description: |
+        Used as the JSON body of POST /sandbox/{name}/exec (non-
+        interactive) and POST /sandbox/{name}/exec/attach (interactive
+        — daemon upgrades the connection to a raw bidirectional
+        stream). Fields that only apply to interactive sessions
+        (e.g. tty) are ignored on the non-interactive endpoint.
+      properties:
+        cmd:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+          description: |
+            Command and arguments to execute. Must contain at least one
+            element (the program to run); each element must be non-empty.
+        tty:
+          type: boolean
+          default: false
+          description: |
+            Allocate a pseudo-TTY. Only meaningful for interactive
+            sessions (POST /sandbox/{name}/exec/attach); ignored by the
+            non-interactive POST /sandbox/{name}/exec endpoint.
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Additional environment variables to set inside the exec, as a
+            map of name → value. Same shape as
+            SandboxCreateRequest.environment so clients have one rule for
+            "env vars" across the API.
+        working_dir:
+          type: string
+          description: Working directory inside the container
+        user:
+          type: string
+          description: "User to run as (name or UID, e.g. \"root\" or \"0\")"
+
+    AgentSessionRequest:
+      type: object
+      description: |
+        Body of POST /sandbox/{name}/agent/session. Every field is optional —
+        an empty body opens a default agent session. `args` are forwarded to
+        the sandbox's agent start script as positional parameters;
+        `start_command` is consulted only when the sandbox predates the
+        baked-in start script and the daemon must heal-write it.
+      properties:
+        args:
+          type: array
+          items:
+            type: string
+          description: |
+            Arguments forwarded to the agent start script as "$@" (e.g. a
+            prompt, or a sub-command like `agents`). Omit for a default
+            session.
+        tty:
+          type: boolean
+          default: false
+          description: Allocate a pseudo-TTY (same semantics as ExecRequest.tty).
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Additional environment variables for the agent session, as a map
+            of name → value. Same shape as ExecRequest.env.
+        working_dir:
+          type: string
+          description: Working directory inside the container.
+        start_command:
+          type: array
+          items:
+            type: string
+            minLength: 1
+          description: |
+            The agent launch command (binary plus its implicit run options)
+            used to heal-write the start script when it is missing: the first
+            element is the binary, the rest are baked as the default run
+            options. Ignored when the script already exists.
+
+    ExecResult:
+      type: object
+      description: |
+        Result of a non-interactive exec. Named `ExecResult` rather than
+        `ExecResponse` so the schema doesn't collide with the generated
+        client's `ExecResponse` wrapper type for the `exec` operation.
+        (Other operations don't have this collision because their operationId
+        doesn't match a noun in the schema namespace.)
+      required: [exit_code]
+      properties:
+        exit_code:
+          type: integer
+        stdout:
+          type: string
+        stderr:
+          type: string
+
+    ExecInspect:
+      type: object
+      description: |
+        State of an interactive exec. Returned by
+        GET /sandbox/{name}/exec/{exec_id} — callers poll this after
+        the upgraded stream from POST /sandbox/{name}/exec/attach
+        closes to recover the exit code, mirroring Moby's
+        ContainerExecInspect.
+      required: [id, running, exit_code]
+      properties:
+        id:
+          type: string
+          description: Docker-backend exec ID.
+        running:
+          type: boolean
+          description: True while the exec is still running.
+        exit_code:
+          type: integer
+          description: Exit code; only meaningful when `running` is false.
+        pid:
+          type: integer
+          description: PID inside the container; 0 when no longer running.
+
+    # ── Ports ──────────────────────────────────────────────────────────────
+    MountAddRequest:
+      type: object
+      required: [host_path]
+      description: |
+        Request body for `POST /sandbox/{name}/mounts`. Adds `host_path`
+        to the policy-enabled "host" virtiofs share's allowlist for the
+        named sandbox so it becomes visible at
+        `/mnt/host/<canonical-host-path>` inside the sandbox VM.
+
+        When `container_target` is set, the daemon additionally performs
+        a real bind mount inside the running container's mount namespace
+        at `container_target` pointing at the in-VM source — the dynamic
+        counterpart of `docker run -v <host_path>:<container_target>`.
+        Idempotent: re-adding an already-allowed path or re-binding the
+        same target is a no-op success.
+      properties:
+        host_path:
+          type: string
+          description: |
+            Absolute NATIVE host path to expose, in the daemon host's own
+            form (`/srv/data` on Linux/macOS, `C:\Users\me\data` on a native
+            Windows daemon). The daemon resolves and allowlists it natively
+            and computes the guest-side form itself; do NOT pre-translate to
+            a guest `/c/...` path. The daemon does NOT stat the path —
+            verifying existence and canonicalizing user input (resolving
+            cwd-relative inputs, cleaning `./..` segments) is the caller's
+            responsibility. The sbx CLI runs `filepath.Abs` + `os.Stat`
+            before submission for `sbx mount`; other HTTP clients must do
+            the same. Symlinks are resolved during allowlist storage.
+        container_target:
+          type: string
+          description: |
+            Optional absolute path inside the sandbox container at which
+            to bind-mount `host_path`. When omitted, the path is only
+            added to the allowlist; callers reach it under `/mnt/host/`
+            followed by the guest-form host path (on Windows the drive
+            letter becomes a child, e.g. `/mnt/host/c/Users/me/data`).
+        options:
+          type: array
+          maxItems: 1
+          items:
+            type: string
+            enum: [ro, rw]
+          description: |
+            Optional mount option. `ro` is enforced at the kernel mount
+            layer via `MOUNT_ATTR_RDONLY` (set on the open_tree clone
+            before move_mount), so guest writes through the bind return
+            EROFS. `rw` is the default. At most one option may be set.
+            Requires `container_target` — passing `options` without a
+            target is a 400, because there is no bind to make read-only
+            and silently accepting it would let callers think they got
+            `ro` semantics they did not actually get.
+
+    MountRemoveRequest:
+      type: object
+      required: [host_path]
+      description: |
+        Request body for `DELETE /sandbox/{name}/mounts`. Removes
+        `host_path` from the policy-enabled "host" share's allowlist for
+        the named sandbox. Idempotent — removing a path that was never
+        allowed succeeds.
+
+        When `container_target` is set, the daemon also umounts the bind
+        at that path inside the sandbox container before mutating the
+        allowlist. When `container_target` is omitted, ONLY the allowlist
+        entry is dropped: `docker run -v` has no host-path-only umount
+        semantics, and using `host_path` as an umount target would
+        attempt to unmount an arbitrary user-controlled path inside the
+        container.
+      properties:
+        host_path:
+          type: string
+          description: Absolute host path to revoke.
+        container_target:
+          type: string
+          description: |
+            Optional absolute path inside the sandbox container of the
+            bind to umount. Must match a target previously passed to
+            `POST /sandbox/{name}/mounts`.
+
+    PortPublishRequest:
+      type: object
+      required: [host_port, sandbox_port]
+      properties:
+        host_ip:
+          type: string
+          default: "127.0.0.1"
+        host_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: Host port to publish on (0 means auto-assign)
+        sandbox_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Container port to publish (1-65535)
+        protocol:
+          type: string
+          enum: [tcp, udp, tcp4, tcp6, udp4, udp6]
+          default: tcp
+
+    PortReplaceDesiredRequest:
+      type: object
+      required: [old, new]
+      properties:
+        old:
+          allOf:
+            - $ref: "#/components/schemas/PortKey"
+          description: |
+            Identifies the saved publish intent to replace. The key uses
+            the same shape as unpublish, but it matches persisted desired
+            port state rather than currently-published live bindings.
+        new:
+          $ref: "#/components/schemas/PortPublishRequest"
+      description: |
+        Replaces a saved publish intent matched by `old` with the publish
+        request in `new`. The replacement is replayed by the next
+        `startSandbox` call.
+
+    PortKey:
+      type: object
+      required: [sandbox_port]
+      description: |
+        Identifies one or more published-port bindings on a sandbox for
+        the purpose of unpublishing them. The key is the *container*
+        side: `sandbox_port` (and optionally `protocol`) is what the
+        user actually thinks about — "I'm done exposing container port
+        3000". The host-side fields are present as optional
+        disambiguators for the unusual case where a sandbox port has
+        multiple host-side bindings; pass them only when you need to
+        narrow the match.
+
+        Match semantics (used by `unpublishPorts`):
+          - the daemon enumerates the sandbox's currently-published
+            ports and removes every entry whose fields equal every
+            field provided in the key;
+          - missing optional fields don't all behave the same. See
+            each field's `description` for the exact rule: `protocol`
+            defaults to `tcp`, `host_ip` expands to the dual-stack
+            loopback pair (symmetric with `publishPorts` — NOT a true
+            wildcard), and `host_port` is a true wildcard;
+          - matching zero entries is a no-op success (the operation is
+            idempotent — declared end state, not a delta).
+      properties:
+        sandbox_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Container port whose binding(s) should be removed.
+        protocol:
+          type: string
+          enum: [tcp, udp, tcp4, tcp6, udp4, udp6]
+          default: tcp
+          description: |
+            Protocol of the binding. Defaults to "tcp" when omitted —
+            sufficient for the common case of one tcp binding per
+            container port.
+        host_ip:
+          type: string
+          description: |
+            Restrict the match to bindings on this host IP. When
+            omitted the key matches the same dual-stack loopback pair
+            (`127.0.0.1` and `::1`) that a `host_ip`-less publish
+            would have used — symmetric with `publishPorts`. To target
+            a routable binding (e.g. one published on `0.0.0.0` or a
+            specific NIC) supply the IP explicitly; an omitted
+            `host_ip` will not match it.
+        host_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: |
+            Restrict the match to a specific host-side port (e.g. when
+            an auto-assigned binding needs to be removed by its
+            published value, available from `listPublishedPorts`).
+            Omit to match every host port.
+
+    PublishedPort:
+      type: object
+      required: [host_ip, host_port, sandbox_port, protocol]
+      properties:
+        host_ip:
+          type: string
+        host_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        sandbox_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          enum: [tcp, udp, tcp4, tcp6, udp4, udp6]
+          description: |
+            Same enum as PortPublishRequest.protocol — kept symmetric so
+            generated clients can exhaustively switch on protocol values
+            from either side of the wire.
+
+    # ── Docker images ─────────────────────────────────────────────────────
+    ImageInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: |
+            Full content-addressable image digest, including its
+            algorithm prefix (e.g. `sha256:abc...`). Stable across
+            the image's lifetime and usable as `name` in
+            `removeImage` and `inspectImage`. UIs that want a short
+            form (Docker's familiar 12-char prefix) can derive it
+            from this value.
+        repository:
+          type: string
+        tag:
+          type: string
+        agent:
+          type: string
+          description: Agent name from image label (if any)
+        created_at:
+          type: string
+          format: date-time
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Image size in bytes. Pretty-printing ("123 MB") is a UI
+            concern and stays in the CLI; the wire format keeps the
+            value summable / sortable.
+        status:
+          type: string
+          enum: [preparing, completed, failed]
+          description: |
+            Async-prep state for the image. Cloud-side extension to
+            describe templates / images that go through a server-side
+            prepare pipeline (snapshot finalize, registry push,
+            metadata extraction). Local sandboxd reports "completed"
+            for every cached image — there is no in-flight state on
+            the local daemon. Cloud fills this in with the real
+            workflow state so `inspectImage` polling can wait for
+            terminal states.
+        failure_message:
+          type: string
+          description: |
+            Server-side failure message, non-empty only when
+            `status == "failed"`. Surfaces verbatim to the user so
+            ops can diagnose snapshot / push errors. Empty on local
+            sandboxd, which never produces a failed state.
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            Optional progress percentage [0, 100] for in-flight
+            prepare work. Best-effort — fields may stay at 0 even for
+            in-progress images on backends that don't model granular
+            progress. Local sandboxd always omits this field.
+
+    ImagePullProgress:
+      type: object
+      description: |
+        One line of pull progress (newline-delimited JSON stream).
+        Matches the Moby Engine API progress format.
+      properties:
+        status:
+          type: string
+        id:
+          type: string
+        progress:
+          type: string
+        progressDetail:
+          type: object
+          properties:
+            current:
+              type: integer
+            total:
+              type: integer
+
+    SaveRequest:
+      type: object
+      required: [tag]
+      properties:
+        tag:
+          type: string
+          description: "Image tag (e.g. \"myimage:v1.0\")"
+        description:
+          type: string
+          description: |
+            Optional human-readable description of the saved image.
+            Cloud-only extension to the save flow; local sandboxd accepts
+            the field for spec parity and ignores it. The unified spec
+            stays the single source of truth for "what can be sent" —
+            see contract-mirror.md in sbx-cloud for the rationale.
+
+    SaveResponse:
+      type: object
+      properties:
+        image_id:
+          type: string
+        tag:
+          type: string
+
+    # ── MCP ────────────────────────────────────────────────────────────────
+    McpGatewayStartRequest:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            type: string
+          description: |
+            Servers to pre-connect. Honoured only when `static` is true;
+            ignored (and conventionally empty) in dynamic mode.
+        static:
+          type: boolean
+          description: |
+            When true, pre-load exactly `servers`, disable dynamic
+            discovery, and suppress the discovery tools. When false (the
+            default), nothing is pre-loaded, the full catalog stays
+            searchable, and the discovery tools remain exposed.
+
+    McpGatewayStartResponse:
+      type: object
+      required: [port, url]
+      properties:
+        port:
+          type: integer
+          description: Local TCP port the gateway is listening on.
+        url:
+          type: string
+          description: |
+            Stable per-sandbox gateway URL baked into the container
+            environment. Invariant across daemon restarts that re-bind
+            the gateway on a fresh ephemeral port.
+        servers:
+          type: array
+          items:
+            type: string
+          description: Servers connected at the gateway.
+        skipped:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpSkippedServer"
+          description: Pre-connect targets that were not connected.
+        inline_servers:
+          type: array
+          items:
+            type: string
+        reused:
+          type: boolean
+          description: |
+            True when the daemon returned an already-running gateway for
+            the sandbox rather than provisioning a new one.
+
+    McpSkippedServer:
+      type: object
+      required: [name, reason]
+      properties:
+        name:
+          type: string
+        reason:
+          type: string
+
+    McpGatewayStatusResponse:
+      type: object
+      required: [port, url]
+      properties:
+        port:
+          type: integer
+        url:
+          type: string
+
+    McpGatewayAddServerRequest:
+      type: object
+      required: [server]
+      properties:
+        server:
+          type: string
+          description: Name of a server already registered in the MCP store.
+
+    McpGatewayAddServerResponse:
+      type: object
+      properties:
+        sandbox:
+          type: string
+        server:
+          type: string
+
+    McpRegistrationCheckRequest:
+      type: object
+      required: [spec]
+      properties:
+        spec:
+          type: object
+          additionalProperties: true
+          description: |
+            Resolved MCP server spec to evaluate. Modeled as a free-form
+            object so this schema does not need to track the MCP runtime's
+            server-spec struct evolution.
+
+    McpRegistrationCheckResponse:
+      type: object
+      required: [allowed]
+      properties:
+        allowed:
+          type: boolean
+          description: True when the registration is permitted by policy.
+        name:
+          type: string
+          description: Name of the evaluated server, echoed for convenience.
+        reason:
+          type: string
+          description: |
+            Human-readable explanation when `allowed` is false. Empty when
+            the registration is allowed.
+
+    # ── Policy ─────────────────────────────────────────────────────────────
+    PolicySetupStatusResponse:
+      type: object
+      required: [needed]
+      properties:
+        needed:
+          type: boolean
+          description: True when first-run policy selection is needed
+
+    PolicySetupRequest:
+      type: object
+      required: [preset]
+      properties:
+        preset:
+          type: string
+          enum: [deny-all, allow-all, balanced]
+
+    PolicySetupResponse:
+      type: object
+      required: [applied]
+      properties:
+        applied:
+          type: boolean
+        already_configured:
+          type: boolean
+        existing_preset:
+          type: string
+          enum: [deny-all, allow-all, balanced]
+
+    PolicyRule:
+      type: object
+      required: [id, resource_type, decision, resources, editable]
+      properties:
+        id:
+          type: string
+          description: Unique identifier for this rule.
+        name:
+          type: string
+          description: |
+            Optional human-readable name (e.g. "default-allow-all",
+            "kit:claude-myproject").
+        policy_id:
+          type: string
+          description: Unique identifier of the policy containing this rule.
+        policy_name:
+          type: string
+          description: User-facing name of the policy containing this rule.
+        scope:
+          type: string
+          description: |
+            Where the containing policy applies — e.g. "global" or
+            "sandbox:<sandbox_id>".
+        applies_to:
+          type: string
+          description: |
+            Which sandboxes this active rule currently applies to. Values are
+            "all", empty when no sandbox currently matches, or a
+            comma-separated list of "sandbox:<sandbox_id>" entries.
+        profiles:
+          type: array
+          items:
+            type: string
+          description: |
+            Governance profiles where the containing policy applies. Empty
+            means the policy applies regardless of profile.
+        resource_type:
+          type: string
+          description: Resource type this rule applies to (e.g. "network", "filesystem:read").
+        decision:
+          type: string
+          enum: [allow, deny]
+        resources:
+          type: array
+          items:
+            type: string
+          description: Resource values (e.g. domains, CIDRs).
+        origin:
+          type: string
+          enum: [local, remote, scoped]
+          description: |
+            Source the rule was loaded from:
+            - "local": configured locally on this machine.
+            - "remote": pushed from a centrally-managed policy source.
+            - "scoped": auto-attached to a single sandbox at create time.
+        status:
+          type: string
+          enum: [active, inactive]
+          description: |
+            Whether the rule participates in authorization right now.
+        reason:
+          type: string
+          description: |
+            Human-readable explanation of why this rule exists. Optional.
+        editable:
+          type: boolean
+          description: |
+            Whether clients should offer mutation actions for this rule.
+            False for system-managed rules (remote, mandatory, etc.).
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Sandbox a scoped rule applies to. Empty for global and
+            remote rules.
+
+    PolicyRulesListResponse:
+      type: object
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRule"
+        organization:
+          type: string
+        profiles:
+          type: array
+          items:
+            type: string
+          description: |
+            All available governance profiles. Empty means profiles are
+            not active for this policy set.
+        organization_unavailable:
+          type: boolean
+          description: |
+            True when the active organization lookup failed but the local
+            rule set was returned successfully. Clients should treat the
+            organization as unknown rather than unset.
+        last_synced_status:
+          type: string
+          enum: [ok, warn]
+          description: |
+            Structured severity for last_synced_message. Populated only
+            when remote governance is in play.
+        last_synced_message:
+          type: string
+          description: |
+            Plain-text sync-status line formatted server-side
+            (e.g. "[OK] last synced 09:21:42"). Populated only when
+            remote governance is in play; empty for local-only setups.
+
+    PolicyRuleAction:
+      description: |
+        A single action against the policy rule set. The `action` field
+        discriminates which schema variant applies and which other fields are
+        required.
+      oneOf:
+        - $ref: "#/components/schemas/PolicyRuleActionAllow"
+        - $ref: "#/components/schemas/PolicyRuleActionDeny"
+        - $ref: "#/components/schemas/PolicyRuleActionRemoveResource"
+        - $ref: "#/components/schemas/PolicyRuleActionRemoveID"
+      discriminator:
+        propertyName: action
+        mapping:
+          allow: "#/components/schemas/PolicyRuleActionAllow"
+          deny: "#/components/schemas/PolicyRuleActionDeny"
+          remove-resource: "#/components/schemas/PolicyRuleActionRemoveResource"
+          remove-id: "#/components/schemas/PolicyRuleActionRemoveID"
+
+    PolicyRuleActionAllow:
+      type: object
+      required: [action, resources]
+      properties:
+        action:
+          type: string
+          enum: [allow]
+        resources:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Scope this action to a specific sandbox. Empty / omitted for
+            global rules.
+
+    PolicyRuleActionDeny:
+      type: object
+      required: [action, resources]
+      properties:
+        action:
+          type: string
+          enum: [deny]
+        resources:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Scope this action to a specific sandbox. Empty / omitted for
+            global rules.
+
+    PolicyRuleActionRemoveResource:
+      type: object
+      required: [action, resources]
+      properties:
+        action:
+          type: string
+          enum: [remove-resource]
+        resources:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Scope this action to a specific sandbox. Empty / omitted for
+            global rules.
+
+    PolicyRuleActionRemoveID:
+      type: object
+      required: [action, id]
+      properties:
+        action:
+          type: string
+          enum: [remove-id]
+        id:
+          type: string
+          minLength: 1
+          description: Rule ID to remove.
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Scope this action to a specific sandbox. Empty / omitted for
+            global rules.
+
+    PolicyRulesRequest:
+      type: object
+      required: [actions]
+      properties:
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRuleAction"
+
+    PolicyRuleResult:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [allow, deny, remove-resource, remove-id]
+          description: |
+            Echoes the action that produced this result — same set as
+            the discriminator on PolicyRuleAction so generated clients
+            can exhaustively switch over results.
+        resources:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Sandbox this action was scoped to. Empty / omitted for
+            global rules.
+        created:
+          type: array
+          items:
+            $ref: "#/components/schemas/CreatedRule"
+        existing:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExistingResource"
+        error:
+          type: string
+
+    CreatedRule:
+      type: object
+      required: [rule_id, resource]
+      properties:
+        rule_id:
+          type: string
+        resource:
+          type: string
+
+    ExistingResource:
+      type: object
+      required: [resource, rule_id]
+      properties:
+        resource:
+          type: string
+        rule_id:
+          type: string
+        rule_name:
+          type: string
+
+    PolicyRulesResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRuleResult"
+
+    NetworkLogEntry:
+      type: object
+      required: [host, vm_name, rule, last_seen, since, count_since]
+      properties:
+        host:
+          type: string
+        vm_name:
+          type: string
+        proxy_type:
+          type: string
+        rule:
+          type: string
+        last_seen:
+          type: string
+          format: date-time
+        since:
+          type: string
+          format: date-time
+        count_since:
+          type: integer
+        reason:
+          type: string
+
+    NetworkLogResponse:
+      type: object
+      required: [blocked_hosts, allowed_hosts]
+      properties:
+        blocked_hosts:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkLogEntry"
+        allowed_hosts:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkLogEntry"
+
+    PolicyProfilesListResponse:
+      type: object
+      required: [profiles]
+      properties:
+        profiles:
+          type: array
+          items:
+            type: string
+          description: |
+            Names of every governance profile defined by the active
+            policy set. Empty when profiles are not active.
+
+    PolicyCheckRequest:
+      type: object
+      required: [type, target]
+      properties:
+        type:
+          type: string
+          enum: [network]
+          description: Resource type to evaluate. Only "network" is supported today.
+        target:
+          type: string
+          description: |
+            Target to evaluate. The daemon accepts bare hosts,
+            host:port values, IP literals, and http(s) URLs.
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: |
+            Scope the check to a sandbox's policy context. Empty /
+            omitted for the global policy.
+
+    PolicyGovernanceStatus:
+      type: object
+      required: [active]
+      properties:
+        active:
+          type: boolean
+          description: |
+            True when corporate governance is active, or when metadata
+            lookup indicates governance exists but organization details
+            are unavailable.
+        organization:
+          type: string
+          description: Display name of the governing organization when known.
+        organization_unavailable:
+          type: boolean
+          description: |
+            True when organization lookup failed. Clients should render
+            this as an unknown governing organization, not local-only.
+        last_synced_status:
+          type: string
+          enum: [ok, warn]
+        last_synced_message:
+          type: string
+          description: Plain-text sync-status line formatted server-side.
+
+    PolicyCheckResponse:
+      type: object
+      required:
+        [allowed, type, target, action, resource_type, resource_value, context, governance]
+      properties:
+        allowed:
+          type: boolean
+        type:
+          type: string
+        target:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_value:
+          type: string
+        context:
+          type: string
+        governance:
+          $ref: "#/components/schemas/PolicyGovernanceStatus"
+        reason:
+          type: string
+        rule:
+          type: string
+        origin:
+          type: string
+        deny_kind:
+          type: string
