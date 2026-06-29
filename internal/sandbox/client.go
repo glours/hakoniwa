@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"time"
 
@@ -78,8 +79,14 @@ type Client interface {
 
 // DaemonClient is the live implementation of Client that talks to sandboxd
 // over the daemon Unix socket.
+//
+// dial and baseURL are used by the HTTP-upgrade helpers (AttachAgentSession)
+// which need a raw net.Conn — the standard http.Client cannot handle
+// protocol upgrades.
 type DaemonClient struct {
-	api *sandboxapi.ClientWithResponses
+	api     *sandboxapi.ClientWithResponses
+	dial    func(ctx context.Context) (net.Conn, error)
+	baseURL string // scheme://host (no path) — used to build upgrade request URLs
 }
 
 // NewDaemonClient creates a DaemonClient that dials the sandboxd Unix socket.
@@ -91,9 +98,14 @@ func NewDaemonClient() (*DaemonClient, error) {
 		socketPath = defaultSocketPath
 	}
 
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dialFn := func(ctx context.Context) (net.Conn, error) {
+		return dialer.DialContext(ctx, "unix", socketPath)
+	}
+
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", socketPath)
+			return dialFn(ctx)
 		},
 	}
 	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
@@ -105,7 +117,7 @@ func NewDaemonClient() (*DaemonClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create sandboxd client: %w", err)
 	}
-	return &DaemonClient{api: api}, nil
+	return &DaemonClient{api: api, dial: dialFn, baseURL: "http://daemon"}, nil
 }
 
 // NewDaemonClientForURL creates a DaemonClient that uses the given base URL
@@ -115,7 +127,27 @@ func NewDaemonClientForURL(baseURL string) (*DaemonClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create sandboxd client: %w", err)
 	}
-	return &DaemonClient{api: api}, nil
+
+	// Parse the URL to extract host for raw TCP dialing (upgrade helper).
+	u, err := parseBaseURL(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse base URL: %w", err)
+	}
+	host := u.Host
+	network := "tcp"
+	if u.Scheme == "unix" {
+		network = "unix"
+		host = u.Path
+	}
+	dialFn := func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, host)
+	}
+	return &DaemonClient{api: api, dial: dialFn, baseURL: baseURL}, nil
+}
+
+// parseBaseURL parses the base URL, returning the url.URL.
+func parseBaseURL(rawURL string) (*neturl.URL, error) {
+	return neturl.Parse(rawURL)
 }
 
 // --- Client interface implementation ---
