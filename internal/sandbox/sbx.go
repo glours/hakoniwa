@@ -67,6 +67,26 @@ type SbxListEntry struct {
 	Status string `json:"status"`
 }
 
+// sensitiveFlags is the set of CLI flags whose following value should be
+// redacted in error messages to avoid leaking secrets into logs.
+var sensitiveFlags = map[string]bool{
+	"--value":       true,
+	"--placeholder": true,
+}
+
+// sanitizeArgs returns a copy of args with values that follow sensitive flags
+// replaced by "***".  It does NOT modify the original slice.
+func sanitizeArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i < len(out)-1; i++ {
+		if sensitiveFlags[out[i]] {
+			out[i+1] = "***"
+		}
+	}
+	return out
+}
+
 // SbxCLIAdapter is the live implementation of SbxAdapter that shells out to `sbx`.
 type SbxCLIAdapter struct {
 	// sbxPath is the full path to the sbx binary.
@@ -84,33 +104,39 @@ func NewSbxCLIAdapter(daemonClient Client) *SbxCLIAdapter {
 }
 
 // NewSbxCLIAdapterForTest creates an SbxCLIAdapter with the given binary path.
-// Exported for use in package-external tests.
+// Exported for use in external tests that inject a fake `sbx` script.
+//
+// Note: In production code prefer NewSbxCLIAdapter; this constructor is for
+// testing only and intentionally kept in the production file so external test
+// packages can reference it without a build-time cyclic import.
 func NewSbxCLIAdapterForTest(sbxPath string, daemonClient Client) *SbxCLIAdapter {
 	return &SbxCLIAdapter{sbxPath: sbxPath, daemonClient: daemonClient}
 }
 
 // run executes a sbx subcommand and returns stdout. Stderr is captured and
-// included in the error message on non-zero exit.
+// included in the error message on non-zero exit. Args are sanitized before
+// inclusion in error strings to avoid leaking secret values.
 func (a *SbxCLIAdapter) run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, a.sbxPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		safe := sanitizeArgs(args)
 		return "", fmt.Errorf("sbx %s: %w\nstderr: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+			strings.Join(safe, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
 
 func (a *SbxCLIAdapter) EnsureDaemon(ctx context.Context) error {
-	_, err := a.run(ctx, "daemon", "status")
-	if err == nil {
+	_, statusErr := a.run(ctx, "daemon", "status")
+	if statusErr == nil {
 		return nil
 	}
-	// Daemon not running — attempt to start it.
+	// Daemon not running (or sbx returned non-zero for any reason) — attempt start.
 	if _, startErr := a.run(ctx, "daemon", "start"); startErr != nil {
-		return fmt.Errorf("daemon not running and start failed: %w", startErr)
+		return fmt.Errorf("daemon not running (status: %v) and start failed: %w", statusErr, startErr)
 	}
 	return nil
 }
@@ -158,6 +184,11 @@ func (a *SbxCLIAdapter) SecretSetCustom(ctx context.Context, sandboxName string,
 	if s.Env != "" {
 		args = append(args, "--env", s.Env)
 	}
+	// Security note: `sbx secret set-custom` requires the value as a --value
+	// flag argument. This exposes it in /proc/<pid>/cmdline and ps output for
+	// the brief duration of the process. Error messages redact it via
+	// sanitizeArgs. A future improvement is to use --value-stdin if the sbx
+	// CLI adds that flag, or write a short-lived temp file.
 	args = append(args, "--value", s.Value)
 	_, err := a.run(ctx, args...)
 	return err
@@ -187,6 +218,10 @@ func (a *SbxCLIAdapter) List(ctx context.Context) ([]SbxListEntry, error) {
 	out, err := a.run(ctx, "ls", "--json")
 	if err != nil {
 		return nil, err
+	}
+	// sbx ls --json may produce no output when there are no sandboxes.
+	if out == "" {
+		return []SbxListEntry{}, nil
 	}
 	var entries []SbxListEntry
 	if err := json.Unmarshal([]byte(out), &entries); err != nil {

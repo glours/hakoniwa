@@ -15,14 +15,20 @@ import (
 	"github.com/glours/hakoniwa/internal/sandbox/sandboxapi"
 )
 
-// fakeSbx writes a shell script at dir/sbx that prints a predefined JSON
-// response and exits with the given code. Returns the full path to the script.
+// fakeSbx writes a shell script at dir/sbx that prints stdout (via printf to
+// avoid single-quote issues) and exits with the given code.
 func fakeSbx(t *testing.T, dir string, exitCode int, stdout string) string {
 	t.Helper()
 	path := filepath.Join(dir, "sbx")
+	// Use printf with a heredoc-style temp file to avoid quoting issues.
 	script := "#!/bin/sh\n"
 	if stdout != "" {
-		script += fmt.Sprintf("echo '%s'\n", stdout)
+		// Write output to a temp file, then cat it, to avoid shell escaping.
+		outFile := filepath.Join(dir, "fakeSbxOut")
+		if err := os.WriteFile(outFile, []byte(stdout+"\n"), 0o644); err != nil {
+			t.Fatalf("write fakeSbxOut: %v", err)
+		}
+		script += fmt.Sprintf("cat %s\n", outFile)
 	}
 	script += fmt.Sprintf("exit %d\n", exitCode)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -35,10 +41,7 @@ func fakeSbx(t *testing.T, dir string, exitCode int, stdout string) string {
 func fakeSbxCapture(t *testing.T, dir, captureFile string) string {
 	t.Helper()
 	path := filepath.Join(dir, "sbx")
-	script := fmt.Sprintf(`#!/bin/sh
-echo "$@" >> %s
-exit 0
-`, captureFile)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\nexit 0\n", captureFile)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake sbx capture: %v", err)
 	}
@@ -46,7 +49,7 @@ exit 0
 }
 
 // newFakeClient returns a sandbox.Client backed by an httptest server that
-// returns the given sandbox info with HTTP 200.
+// returns the given sandbox info with HTTP 200, or 404 if info is nil.
 func newFakeClient(t *testing.T, info *sandboxapi.SandboxInfo) sandbox.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +59,9 @@ func newFakeClient(t *testing.T, info *sandboxapi.SandboxInfo) sandbox.Client {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(info)
+		if err := json.NewEncoder(w).Encode(info); err != nil {
+			t.Errorf("encode: %v", err)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	c, err := sandbox.NewDaemonClientForURL(srv.URL)
@@ -77,9 +82,8 @@ func TestSbxAdapterEnsureDaemonRunning(t *testing.T) {
 
 func TestSbxAdapterEnsureDaemonStarted(t *testing.T) {
 	dir := t.TempDir()
-	// daemon status exits 1 (not running), daemon start exits 0
-	path := filepath.Join(dir, "sbx")
 	calls := filepath.Join(dir, "calls.txt")
+	path := filepath.Join(dir, "sbx")
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$@" >> %s
 case "$*" in
@@ -100,21 +104,18 @@ func TestSbxAdapterCreateNew(t *testing.T) {
 	dir := t.TempDir()
 	sbxPath := fakeSbx(t, dir, 0, "") // create succeeds
 	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
-	err := adapter.Create(context.Background(), sandbox.CreateRequest{
+	if err := adapter.Create(context.Background(), sandbox.CreateRequest{
 		Name: "proj-agent", Agent: "claude",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 }
 
 func TestSbxAdapterCreateReuse409(t *testing.T) {
-	// sbx create returns exit 1 (conflict), but inspect returns the sandbox.
 	dir := t.TempDir()
 	sbxPath := fakeSbx(t, dir, 1, "") // create fails
 	info := &sandboxapi.SandboxInfo{Id: "id-1", Name: "proj-agent"}
 	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, info))
-	// Should return nil because InspectSandbox succeeds.
 	if err := adapter.Create(context.Background(), sandbox.CreateRequest{
 		Name: "proj-agent", Agent: "claude",
 	}); err != nil {
@@ -123,10 +124,9 @@ func TestSbxAdapterCreateReuse409(t *testing.T) {
 }
 
 func TestSbxAdapterCreateFailure(t *testing.T) {
-	// sbx create returns exit 1 AND inspect fails (sandbox truly absent).
 	dir := t.TempDir()
 	sbxPath := fakeSbx(t, dir, 1, "")                                          // create fails
-	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil)) // inspect returns 404
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil)) // inspect → 404
 	err := adapter.Create(context.Background(), sandbox.CreateRequest{
 		Name: "proj-agent", Agent: "claude",
 	})
@@ -150,6 +150,20 @@ func TestSbxAdapterList(t *testing.T) {
 	}
 }
 
+func TestSbxAdapterListEmpty(t *testing.T) {
+	// sbx ls --json producing no output should return empty slice, not an error.
+	dir := t.TempDir()
+	sbxPath := fakeSbx(t, dir, 0, "") // no output
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
+	got, err := adapter.List(context.Background())
+	if err != nil {
+		t.Fatalf("List(empty): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty slice, got %v", got)
+	}
+}
+
 func TestSbxAdapterSecretSetCustom(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "calls.txt")
@@ -167,6 +181,87 @@ func TestSbxAdapterSecretSetCustom(t *testing.T) {
 	calls := string(callsBytes)
 	for _, want := range []string{"secret", "set-custom", "my-sandbox", "--env", "GH_TOKEN", "--host", "api.github.com", "--value", "tok123"} {
 		if !strings.Contains(calls, want) {
+			t.Errorf("calls %q missing %q", calls, want)
+		}
+	}
+}
+
+func TestSbxAdapterSecretRedactedInError(t *testing.T) {
+	// When sbx secret set-custom fails, the error must NOT contain the secret value.
+	dir := t.TempDir()
+	sbxPath := fakeSbx(t, dir, 1, "") // command fails
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
+	err := adapter.SecretSetCustom(context.Background(), "my-sandbox", sandbox.SecretSetRequest{
+		Value: "supersecret",
+		Env:   "TOKEN",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Errorf("error message leaks secret value: %v", err)
+	}
+}
+
+func TestSbxAdapterPolicySetDefault(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "calls.txt")
+	sbxPath := fakeSbxCapture(t, dir, capture)
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
+	if err := adapter.PolicySetDefault(context.Background(), "balanced"); err != nil {
+		t.Fatalf("PolicySetDefault: %v", err)
+	}
+	calls, _ := os.ReadFile(capture)
+	for _, want := range []string{"policy", "set-default", "balanced"} {
+		if !strings.Contains(string(calls), want) {
+			t.Errorf("calls %q missing %q", calls, want)
+		}
+	}
+}
+
+func TestSbxAdapterPolicyAllow(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "calls.txt")
+	sbxPath := fakeSbxCapture(t, dir, capture)
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
+	if err := adapter.PolicyAllow(context.Background(), "proj-agent", "*.github.com"); err != nil {
+		t.Fatalf("PolicyAllow: %v", err)
+	}
+	calls, _ := os.ReadFile(capture)
+	for _, want := range []string{"policy", "allow", "--sandbox", "proj-agent", "*.github.com"} {
+		if !strings.Contains(string(calls), want) {
+			t.Errorf("calls %q missing %q", calls, want)
+		}
+	}
+}
+
+func TestSbxAdapterPolicyDeny(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "calls.txt")
+	sbxPath := fakeSbxCapture(t, dir, capture)
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
+	if err := adapter.PolicyDeny(context.Background(), "proj-agent", "*.telemetry.io"); err != nil {
+		t.Fatalf("PolicyDeny: %v", err)
+	}
+	calls, _ := os.ReadFile(capture)
+	for _, want := range []string{"policy", "deny", "--sandbox", "proj-agent", "*.telemetry.io"} {
+		if !strings.Contains(string(calls), want) {
+			t.Errorf("calls %q missing %q", calls, want)
+		}
+	}
+}
+
+func TestSbxAdapterPolicyRemove(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "calls.txt")
+	sbxPath := fakeSbxCapture(t, dir, capture)
+	adapter := sandbox.NewSbxCLIAdapterForTest(sbxPath, newFakeClient(t, nil))
+	if err := adapter.PolicyRemove(context.Background(), "proj-agent", "rule-uuid-123"); err != nil {
+		t.Fatalf("PolicyRemove: %v", err)
+	}
+	calls, _ := os.ReadFile(capture)
+	for _, want := range []string{"policy", "rm", "--sandbox", "proj-agent", "rule-uuid-123"} {
+		if !strings.Contains(string(calls), want) {
 			t.Errorf("calls %q missing %q", calls, want)
 		}
 	}
