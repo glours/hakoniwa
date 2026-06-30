@@ -7,8 +7,6 @@ import (
 	"github.com/glours/hakoniwa/internal/sandbox/sandboxapi"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 func TestParsePortSpecBasic(t *testing.T) {
 	req, err := sandbox.ParsePortSpec("8080:8080")
 	if err != nil {

@@ -42,21 +42,6 @@ func (d *fakeDriver) AttachAgentSession(_ context.Context, name string, _ sandbo
 }
 
 // ---------------------------------------------------------------------------
-// newTestOrchestratorWithDriver — builds an Orchestrator with all fakes
-// ---------------------------------------------------------------------------
-
-func newTestOrchestratorWithDriver(s *fakeState, ds *fakeDriverState, projectName string) (*Orchestrator, error) {
-	orch, err := newTestOrchestrator(s, projectName)
-	if err != nil {
-		return nil, err
-	}
-	stager := newFakeStager()
-	orch.Driver = &fakeDriver{state: ds}
-	orch.Stager = stager
-	return orch, nil
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -123,7 +108,7 @@ func TestExecutorLinearChain(t *testing.T) {
 	if aIdx < 0 || bIdx < 0 || cIdx < 0 {
 		t.Errorf("not all agents drove a session: %v", ds.attached)
 	}
-	if !(aIdx < bIdx && bIdx < cIdx) {
+	if aIdx >= bIdx || bIdx >= cIdx {
 		t.Errorf("wrong order: a=%d b=%d c=%d (attached: %v)", aIdx, bIdx, cIdx, ds.attached)
 	}
 }

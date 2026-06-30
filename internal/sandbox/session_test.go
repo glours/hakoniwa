@@ -126,7 +126,7 @@ func TestAttachAgentSessionExecID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachAgentSession: %v", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	if session.ExecID() != "exec-abc-123" {
 		t.Errorf("ExecID = %q, want %q", session.ExecID(), "exec-abc-123")
@@ -147,7 +147,7 @@ func TestAttachAgentSessionStreamOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachAgentSession: %v", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	var out, errBuf bytes.Buffer
 	if err := session.Stream(&out, &errBuf); err != nil {
@@ -215,7 +215,7 @@ func TestAttachAgentSessionBodyForwarded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachAgentSession: %v", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	_ = session.Stream(io.Discard, io.Discard)
 
 	var decoded sandboxapi.AgentSessionRequest
