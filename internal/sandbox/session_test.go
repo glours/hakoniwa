@@ -66,7 +66,7 @@ func (h *upgradeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.t.Fatalf("Hijack: %v", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Write 101 Switching Protocols response.
 	resp := fmt.Sprintf(
@@ -195,7 +195,7 @@ func TestAttachAgentSessionBodyForwarded(t *testing.T) {
 		receivedBody, _ = io.ReadAll(r.Body)
 		hj := w.(http.Hijacker)
 		conn, buf, _ := hj.Hijack()
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		resp := fmt.Sprintf(
 			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: tcp\r\nConnection: Upgrade\r\n%s: exec-1\r\n\r\n",
 			execIDHeader,

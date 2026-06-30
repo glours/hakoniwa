@@ -1,0 +1,25 @@
+# .golangci.yml — shared linter configuration for github.com/glours/hakoniwa
+#
+# Run with: golangci-lint run ./...
+# Or via:   make lint
+
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # unchecked error return values
+    - staticcheck   # broad static analysis (De Morgan, dead code, …)
+    - unused        # identifiers that are never referenced
+    - govet         # suspicious constructs (shadow, printf format, …)
+    - gofmt         # formatting
+
+linters-settings:
+  errcheck:
+    # _, _ = expr is treated as "checked" (no errcheck violation).
+    check-blank: false
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

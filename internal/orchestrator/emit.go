@@ -38,16 +38,16 @@ func (d *EmitDetector) DriveAndEmit(
 	ea *config.EffectiveAgent,
 	session sandbox.Session,
 ) error {
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
-	fmt.Fprintf(d.Out, "[%s] streaming session…\n", agentName)
+	_, _ = fmt.Fprintf(d.Out, "[%s] streaming session…\n", agentName)
 
 	// Stream the agent output (blocks until session ends).
 	if err := session.Stream(d.Out, d.Out); err != nil {
 		return fmt.Errorf("[%s] session stream error: %w", agentName, err)
 	}
 
-	fmt.Fprintf(d.Out, "[%s] session ended; checking exit code…\n", agentName)
+	_, _ = fmt.Fprintf(d.Out, "[%s] session ended; checking exit code…\n", agentName)
 
 	// Recover exit code via InspectExec.
 	exitCode, err := session.ExitCode(ctx)
@@ -71,7 +71,7 @@ func (d *EmitDetector) DriveAndEmit(
 // and fires the channel in the registry.
 func (d *EmitDetector) fireChannel(ctx context.Context, agentName, sbxName, ch string) error {
 	path := sandbox.HakoOutPath(ch)
-	fmt.Fprintf(d.Out, "[%s] reading emit payload for channel %q from %s\n", agentName, ch, path)
+	_, _ = fmt.Fprintf(d.Out, "[%s] reading emit payload for channel %q from %s\n", agentName, ch, path)
 
 	payload, err := d.Stager.GetFile(ctx, sbxName, path)
 	if err != nil {
@@ -89,6 +89,6 @@ func (d *EmitDetector) fireChannel(ctx context.Context, agentName, sbxName, ch s
 		return fmt.Errorf("[%s] fire channel %q: %w", agentName, ch, err)
 	}
 
-	fmt.Fprintf(d.Out, "[%s] channel %q fired ✓ (%d bytes)\n", agentName, ch, len(payload))
+	_, _ = fmt.Fprintf(d.Out, "[%s] channel %q fired ✓ (%d bytes)\n", agentName, ch, len(payload))
 	return nil
 }
