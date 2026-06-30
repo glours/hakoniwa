@@ -77,12 +77,16 @@ func LoadReader(name string, r io.Reader) (*LoadResult, error) {
 
 // Load reads a project file from the given path, strictly decodes it, and
 // returns the project together with a map of YAML-path → source position.
-func Load(path string) (*LoadResult, error) {
+func Load(path string) (_ *LoadResult, rerr error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && rerr == nil {
+			rerr = fmt.Errorf("close %s: %w", path, cerr)
+		}
+	}()
 	return load(path, f)
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
@@ -56,8 +55,4 @@ multi-agent applications where each AI agent runs in its own Docker Sandbox.`,
 	)
 
 	return root
-}
-
-func notImplemented(cmd *cobra.Command, _ []string) error {
-	return fmt.Errorf("%s: not implemented yet", cmd.Name())
 }

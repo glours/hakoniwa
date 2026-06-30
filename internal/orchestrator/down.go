@@ -19,7 +19,7 @@ import (
 func (o *Orchestrator) Down(ctx context.Context) error {
 	prefix := o.ProjectName + "-"
 
-	fmt.Fprintf(o.Out, "Listing sandboxes for project %q…\n", o.ProjectName)
+	_, _ = fmt.Fprintf(o.Out, "Listing sandboxes for project %q…\n", o.ProjectName)
 
 	all, err := o.Client.ListSandboxes(ctx)
 	if err != nil {
@@ -35,7 +35,7 @@ func (o *Orchestrator) Down(ctx context.Context) error {
 	}
 
 	if len(ours) == 0 {
-		fmt.Fprintf(o.Out, "No sandboxes found for project %q — nothing to do.\n", o.ProjectName)
+		_, _ = fmt.Fprintf(o.Out, "No sandboxes found for project %q — nothing to do.\n", o.ProjectName)
 		return nil
 	}
 
@@ -45,13 +45,13 @@ func (o *Orchestrator) Down(ctx context.Context) error {
 		}
 	}
 
-	fmt.Fprintf(o.Out, "Project %q torn down.\n", o.ProjectName)
+	_, _ = fmt.Fprintf(o.Out, "Project %q torn down.\n", o.ProjectName)
 	return nil
 }
 
 // teardownSandbox stops, unpublishes, and deletes a single sandbox.
 func (o *Orchestrator) teardownSandbox(ctx context.Context, sbxName string) error {
-	fmt.Fprintf(o.Out, "[%s] stopping…\n", sbxName)
+	_, _ = fmt.Fprintf(o.Out, "[%s] stopping…\n", sbxName)
 
 	// Stop (idempotent — ignore NotFound).
 	if _, err := o.Client.StopSandbox(ctx, sbxName); err != nil {
@@ -76,22 +76,22 @@ func (o *Orchestrator) teardownSandbox(ctx context.Context, sbxName string) erro
 				Protocol:    &proto,
 			}
 		}
-		fmt.Fprintf(o.Out, "[%s] unpublishing %d port(s)\n", sbxName, len(keys))
+		_, _ = fmt.Fprintf(o.Out, "[%s] unpublishing %d port(s)\n", sbxName, len(keys))
 		if err := o.Client.UnpublishPorts(ctx, sbxName, keys); err != nil && !sandbox.IsNotFound(err) {
 			return fmt.Errorf("[%s] unpublish ports: %w", sbxName, err)
 		}
 	}
 
 	// Delete the sandbox.
-	fmt.Fprintf(o.Out, "[%s] deleting…\n", sbxName)
+	_, _ = fmt.Fprintf(o.Out, "[%s] deleting…\n", sbxName)
 	if err := o.Client.DeleteSandbox(ctx, sbxName); err != nil {
 		if !sandbox.IsNotFound(err) {
 			return fmt.Errorf("[%s] delete: %w", sbxName, err)
 		}
 		// Already gone — idempotent.
-		fmt.Fprintf(o.Out, "[%s] already removed\n", sbxName)
+		_, _ = fmt.Fprintf(o.Out, "[%s] already removed\n", sbxName)
 	} else {
-		fmt.Fprintf(o.Out, "[%s] removed ✓\n", sbxName)
+		_, _ = fmt.Fprintf(o.Out, "[%s] removed ✓\n", sbxName)
 	}
 
 	return nil

@@ -55,8 +55,8 @@ func TestLogsSubcmd(t *testing.T) {
 }
 
 func TestSubcmdStubs(t *testing.T) {
-	// Commands still using the notImplemented stub.
-	// Remove entries here as they are wired up.
+	// All subcommands are now wired (no stubs remain).
+	// This test is kept as a placeholder for any future stubs.
 	for _, sub := range []string{} {
 		root := newRootCmd()
 		buf := &bytes.Buffer{}

@@ -152,14 +152,14 @@ func (c *DaemonClient) AttachAgentSession(
 	path := fmt.Sprintf(agentSessionPath, name)
 	u, err := buildURL(c.baseURL, path)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("AttachAgentSession: build URL: %w", err)
 	}
 
 	// Construct the HTTP request with upgrade headers.
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(bodyBytes))
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("AttachAgentSession: new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -168,7 +168,7 @@ func (c *DaemonClient) AttachAgentSession(
 
 	// Write the request to the raw connection.
 	if err := httpReq.Write(conn); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("AttachAgentSession: write request: %w", err)
 	}
 
@@ -177,7 +177,7 @@ func (c *DaemonClient) AttachAgentSession(
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, httpReq)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("AttachAgentSession: read response: %w", err)
 	}
 	// Consume and close the response body (it is empty for non-upgrade status
@@ -185,13 +185,13 @@ func (c *DaemonClient) AttachAgentSession(
 	if resp.Body != nil {
 		if resp.StatusCode != http.StatusSwitchingProtocols {
 			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			conn.Close()
+			_ = resp.Body.Close()
+			_ = conn.Close()
 			return nil, mapUpgradeError(resp.StatusCode, name, body)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	} else if resp.StatusCode != http.StatusSwitchingProtocols {
-		conn.Close()
+		_ = conn.Close()
 		return nil, mapUpgradeError(resp.StatusCode, name, nil)
 	}
 

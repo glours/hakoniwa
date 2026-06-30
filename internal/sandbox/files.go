@@ -69,7 +69,7 @@ func (c *DaemonClient) GetFile(ctx context.Context, name, path string) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("GetFile %q %q: %w", name, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -122,7 +122,7 @@ func (c *DaemonClient) PutFile(ctx context.Context, name, path string, data []by
 	if err != nil {
 		return fmt.Errorf("PutFile %q %q: %w", name, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
