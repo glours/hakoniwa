@@ -1,26 +1,46 @@
-# cross-review — Hakoniwa example (#2)
+# cross-review — Hakoniwa example (use case #2: fan-out + fan-in review)
 #
-# Use case: a producer agent generates an artifact, then two reviewer agents
-# independently review it (fan-out), and a merger agent joins their feedback
-# (fan-in) to produce the final output.
+# One producer agent generates an artifact, two independent reviewer agents
+# evaluate it in parallel (fan-out), and a merger agent consolidates their
+# feedback (fan-in):
 #
-# Run with: hako up
-# Tear down: hako down
-# Preview:   hako plan
+#   producer ──artifact.ready──▶ reviewer-alpha ──review.alpha──▶ merger
+#                             ▶ reviewer-beta  ──review.beta ──▶ merger
+#
+# Prerequisites
+# -------------
+# - sbx CLI installed and authenticated (docker login + sbx login)
+# - Environment variables:
+#     ANTHROPIC_API_KEY   — for claude agents (producer, merger)
+#     OPENAI_API_KEY      — for codex agent (reviewer-alpha)
+#     GOOGLE_API_KEY      — for gemini agent (reviewer-beta)
+#
+# Usage
+# -----
+#   hako plan           # preview the execution graph
+#   hako up             # run the pipeline
+#   hako ps             # check statuses
+#   hako down           # clean up
+#
+# Expected output
+# ---------------
+# - producer writes its artifact to /root/.hako/out/artifact.ready.json
+# - Each reviewer reads the artifact and writes its review to
+#   /root/.hako/out/review.{alpha,beta}.json
+# - merger reads both reviews from /root/.hako/in/ and writes the
+#   consolidated output to /root/.hako/out/merged.json
 
 name: cross-review
 
 defaults:
   policy:
-    default: balanced      # balanced preset: outbound HTTPS allowed, deny-all else
-    allow_widening: false  # per-agent allow rules are blocked (reviewers cannot open new egress)
-  kits:
-    - oci://registry.example.com/kits/base:1.0   # shared base kit for all agents
+    default: balanced       # outbound HTTPS allowed; deny everything else
+    allow_widening: false   # reviewers may not open additional egress paths
 
 channels:
-  - artifact.ready    # fired by producer when the artifact is written
-  - review.alpha      # fired by reviewer-alpha when its review is complete
-  - review.beta       # fired by reviewer-beta when its review is complete
+  - artifact.ready   # fired by producer
+  - review.alpha     # fired by reviewer-alpha
+  - review.beta      # fired by reviewer-beta
 
 agents:
 
@@ -28,20 +48,18 @@ agents:
     agent: claude
     resources: { cpus: 2, memory: 4096 }
     secrets:
-      - { value: "gh auth token", env: GH_TOKEN, host: api.github.com }
+      - { value: "${ANTHROPIC_API_KEY}", env: ANTHROPIC_API_KEY }
+      - { value: "gh auth token",        env: GH_TOKEN, host: api.github.com, optional: true }
     policy:
       network:
-        deny: ["*.telemetry.io"]     # deny telemetry that the base kit might phone home to
+        deny: ["*.telemetry.io"]
     emits: [artifact.ready]
-    # Prompt the agent to produce the artifact and write its result to:
-    #   /root/.hako/out/artifact.ready.json
-    # (This is done by the initial prompt injected by the orchestrator.)
 
   reviewer-alpha:
     agent: codex
     resources: { cpus: 2, memory: 4096 }
     secrets:
-      - { value: "op://vault/openai/api-key", env: OPENAI_API_KEY }
+      - { value: "${OPENAI_API_KEY}", env: OPENAI_API_KEY }
     policy:
       network:
         deny: ["*.telemetry.io", "*.statsig.com"]
@@ -54,7 +72,7 @@ agents:
     agent: gemini
     resources: { cpus: 2, memory: 4096 }
     secrets:
-      - { value: "op://vault/google/api-key", env: GOOGLE_API_KEY }
+      - { value: "${GOOGLE_API_KEY}", env: GOOGLE_API_KEY }
     policy:
       network:
         deny: ["*.telemetry.io"]
@@ -66,10 +84,10 @@ agents:
   merger:
     agent: claude
     resources: { cpus: 2, memory: 4096 }
+    secrets:
+      - { value: "${ANTHROPIC_API_KEY}", env: ANTHROPIC_API_KEY }
     # Fan-in: merger waits for BOTH reviewers before starting.
     depends_on:
       reviewer-alpha: { condition: on_event, channel: review.alpha }
       reviewer-beta:  { condition: on_event, channel: review.beta }
     subscribes: [review.alpha, review.beta]
-    # Merger writes its consolidated output to /root/.hako/out/merged.json
-    # (no emits declared — it is the terminal node).

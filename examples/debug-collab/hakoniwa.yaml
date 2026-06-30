@@ -1,69 +1,84 @@
-# debug-collab — Hakoniwa example (#4)
+# debug-collab — Hakoniwa example (use case #4: collaborative debugging)
 #
-# Use case: a reproducer agent creates a minimal reproducible bug report,
-# a fixer agent receives it and produces a patch (reaching back into the
-# reproducer's sandbox to inspect live state), and a test-writer agent
-# generates regression tests from the patch.
+# Three AI agents collaborate to fix a bug end-to-end:
+#   1. reproducer (claude) — clones the repo, reproduces the bug,
+#      exposes a live HTTP diagnostic endpoint, and emits repro.ready
+#   2. fixer (codex) — waits for repro.ready, reads the diagnostic via
+#      reach, produces a patch, and emits fix.ready
+#   3. test-writer (gemini) — waits for fix.ready and generates a
+#      regression test suite from the patch
 #
-# Run with: hako up
-# Tear down: hako down
-# Preview:   hako plan
+# Prerequisites
+# -------------
+# - sbx CLI installed and authenticated (docker login + sbx login)
+# - Environment variables:
+#     ANTHROPIC_API_KEY   — for the claude agent (reproducer)
+#     OPENAI_API_KEY      — for the codex agent (fixer)
+#     GOOGLE_API_KEY      — for the gemini agent (test-writer)
+#     GH_TOKEN            — GitHub token for cloning private repos (optional)
+#
+# Usage
+# -----
+#   hako plan           # preview what will happen
+#   hako up             # run the full pipeline
+#   hako logs fixer     # stream fixer output live
+#   hako ps             # check agent statuses
+#   hako down           # tear everything down
+#
+# Expected output
+# ---------------
+# Each agent writes its result to /root/.hako/out/<channel>.json.
+# The orchestrator stages those payloads into the next agent's
+# /root/.hako/in/<channel>.json before its session starts.
 
 name: debug-collab
 
 defaults:
   policy:
-    default: deny-all       # strict: deny all outbound by default
-    allow_widening: true    # allow per-agent allow rules (fixer needs to reach reproducer)
-  kits:
-    - oci://registry.example.com/kits/debug-base:2.0
+    default: balanced    # allow outbound HTTPS, deny everything else
 
 channels:
-  - repro.ready    # fired by reproducer when the bug is reproduced and state is live
-  - fix.ready      # fired by fixer when the patch is ready
+  - repro.ready   # fired by reproducer when bug is reproduced + service live
+  - fix.ready     # fired by fixer when patch is ready
 
 agents:
 
   reproducer:
     agent: claude
-    template: node          # Node.js container image for the bug environment
     resources: { cpus: 4, memory: 8192 }
     ports:
-      - "8080:8080"         # HTTP API exposed so the fixer can inspect live state
+      - "8080:8080"   # live diagnostic HTTP endpoint for the fixer to reach
     secrets:
-      - { value: "gh auth token", env: GH_TOKEN, host: api.github.com }
+      - { value: "${ANTHROPIC_API_KEY}", env: ANTHROPIC_API_KEY }
+      - { value: "gh auth token",        env: GH_TOKEN, host: api.github.com, optional: true }
     policy:
       network:
-        allow: ["api.github.com"]    # allow pulling the failing repo
+        allow: ["api.github.com", "*.githubusercontent.com"]
     emits: [repro.ready]
 
   fixer:
     agent: codex
     resources: { cpus: 4, memory: 8192 }
     secrets:
-      - { value: "op://vault/openai/api-key", env: OPENAI_API_KEY }
+      - { value: "${OPENAI_API_KEY}", env: OPENAI_API_KEY }
     policy:
       network:
-        allow: ["api.github.com", "*.npmjs.com"]   # pull dependencies for the fix
+        allow: ["api.github.com", "registry.npmjs.org"]
     depends_on:
       reproducer: { condition: on_event, channel: repro.ready }
     subscribes: [repro.ready]
-    # reach: connect to the reproducer's live HTTP API to inspect running state.
-    # The orchestrator publishes reproducer:8080 and injects:
-    #   HAKO_REACH_REPRODUCER_8080=host.docker.internal:<host-port>
+    # HAKO_REACH_REPRODUCER_8080=host.docker.internal:<host_port> injected at runtime
     reach: ["reproducer:8080"]
     emits: [fix.ready]
 
   test-writer:
     agent: gemini
     resources: { cpus: 2, memory: 4096 }
-    kits:
-      - ./kits/test-runner    # local kit with test framework pre-installed
+    secrets:
+      - { value: "${GOOGLE_API_KEY}", env: GOOGLE_API_KEY }
     policy:
       network:
-        allow: ["*.npmjs.com"]    # install test dependencies
+        allow: ["api.github.com", "registry.npmjs.org", "pypi.org"]
     depends_on:
       fixer: { condition: on_event, channel: fix.ready }
     subscribes: [fix.ready]
-    # test-writer produces the regression test suite at:
-    #   /root/.hako/out/tests.json (metadata) + /root/tests/ (test files)
