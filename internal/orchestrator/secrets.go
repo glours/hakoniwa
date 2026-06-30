@@ -38,7 +38,7 @@ func (o *Orchestrator) ApplySecretsAndPolicy(ctx context.Context, project *confi
 
 	// Apply project-level policy default once (idempotent).
 	if project.Defaults.Policy.Default != "" {
-		fmt.Fprintf(o.Out, "Setting policy default: %s\n", project.Defaults.Policy.Default)
+		logf(o.Out, "Setting policy default: %s\n", project.Defaults.Policy.Default)
 		if err := o.Sbx.PolicySetDefault(ctx, string(project.Defaults.Policy.Default)); err != nil {
 			return fmt.Errorf("policy set-default: %w", err)
 		}
@@ -59,13 +59,13 @@ func (o *Orchestrator) ApplySecretsAndPolicy(ctx context.Context, project *confi
 			value, err := resolveSecretValue(ctx, sec.Value)
 			if err != nil {
 				if sec.Optional {
-					fmt.Fprintf(o.Out, "[%s] secret[%d] optional resolution failed, skipping: %v\n",
+					logf(o.Out, "[%s] secret[%d] optional resolution failed, skipping: %v\n",
 						agentName, i, err)
 					continue
 				}
 				return fmt.Errorf("[%s] secret[%d] resolve: %w", agentName, i, err)
 			}
-			fmt.Fprintf(o.Out, "[%s] injecting secret (env=%s)\n", agentName, sec.Env)
+			logf(o.Out, "[%s] injecting secret (env=%s)\n", agentName, sec.Env)
 			if err := o.Sbx.SecretSetCustom(ctx, sbxName, sandbox.SecretSetRequest{
 				Value:       value,
 				Env:         sec.Env,
@@ -73,7 +73,7 @@ func (o *Orchestrator) ApplySecretsAndPolicy(ctx context.Context, project *confi
 				Placeholder: sec.Placeholder,
 			}); err != nil {
 				if sec.Optional {
-					fmt.Fprintf(o.Out, "[%s] secret inject optional failure, skipping: %v\n", agentName, err)
+					logf(o.Out, "[%s] secret inject optional failure, skipping: %v\n", agentName, err)
 					continue
 				}
 				return fmt.Errorf("[%s] secret inject: %w", agentName, err)
@@ -129,7 +129,7 @@ func (o *Orchestrator) convergePolicy(ctx context.Context, agentName, sbxName st
 	// Allow rules: each declared rule gets a prefixed label.
 	for _, rule := range ea.Policy.Network.Allow {
 		label := hakoRulePrefix + rule
-		fmt.Fprintf(o.Out, "[%s] policy allow %s\n", agentName, rule)
+		logf(o.Out, "[%s] policy allow %s\n", agentName, rule)
 		if err := o.Sbx.PolicyAllow(ctx, sbxName, label); err != nil {
 			return fmt.Errorf("[%s] policy allow %q: %w", agentName, rule, err)
 		}
@@ -137,7 +137,7 @@ func (o *Orchestrator) convergePolicy(ctx context.Context, agentName, sbxName st
 	// Deny rules.
 	for _, rule := range ea.Policy.Network.Deny {
 		label := hakoRulePrefix + rule
-		fmt.Fprintf(o.Out, "[%s] policy deny %s\n", agentName, rule)
+		logf(o.Out, "[%s] policy deny %s\n", agentName, rule)
 		if err := o.Sbx.PolicyDeny(ctx, sbxName, label); err != nil {
 			return fmt.Errorf("[%s] policy deny %q: %w", agentName, rule, err)
 		}

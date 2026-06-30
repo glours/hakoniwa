@@ -66,20 +66,20 @@ func runLogs(cmd *cobra.Command, file string, args []string, follow bool) error 
 		info, err := client.InspectSandbox(cmd.Context(), sbxName)
 		if err != nil {
 			if sandbox.IsNotFound(err) {
-				fmt.Fprintf(out, "[%s] sandbox %s not found — skipping\n", name, sbxName)
+				_, _ = fmt.Fprintf(out, "[%s] sandbox %s not found — skipping\n", name, sbxName)
 				continue
 			}
 			return fmt.Errorf("[%s] inspect: %w", name, err)
 		}
 		if info.Status != sandboxapi.SandboxInfoStatusRunning {
-			fmt.Fprintf(out, "[%s] sandbox %s is %s — skipping\n", name, sbxName, info.Status)
+			_, _ = fmt.Fprintf(out, "[%s] sandbox %s is %s — skipping\n", name, sbxName, info.Status)
 			continue
 		}
 
 		// Attach a session to stream output.
 		session, err := client.AttachAgentSession(cmd.Context(), sbxName, sandboxapi.AgentSessionRequest{})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] attach session: %v\n", name, err)
+			_, _ = fmt.Fprintf(os.Stderr, "[%s] attach session: %v\n", name, err)
 			continue
 		}
 
@@ -89,7 +89,7 @@ func runLogs(cmd *cobra.Command, file string, args []string, follow bool) error 
 				prefixWriter(out, "["+name+"] "),
 				prefixWriter(os.Stderr, "["+name+"][err] "),
 			); err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] stream error: %v\n", name, err)
+				_, _ = fmt.Fprintf(os.Stderr, "[%s] stream error: %v\n", name, err)
 			}
 		} else {
 			// Non-follow: drain available output then return.
@@ -98,7 +98,7 @@ func runLogs(cmd *cobra.Command, file string, args []string, follow bool) error 
 				prefixWriter(out, "["+name+"] "),
 				prefixWriter(os.Stderr, "["+name+"][err] "),
 			); err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] stream error: %v\n", name, err)
+				_, _ = fmt.Fprintf(os.Stderr, "[%s] stream error: %v\n", name, err)
 			}
 		}
 		_ = session.Close()

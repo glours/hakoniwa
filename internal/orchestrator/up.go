@@ -27,7 +27,7 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 		return fmt.Errorf("build dependency graph: %w", err)
 	}
 
-	fmt.Fprintf(o.Out, "Ensuring daemon is running\u2026\n")
+	logf(o.Out, "Ensuring daemon is running\u2026\n")
 	if err := o.Sbx.EnsureDaemon(ctx); err != nil {
 		return fmt.Errorf("ensure daemon: %w", err)
 	}
@@ -83,7 +83,7 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 		}
 	}
 
-	fmt.Fprintf(o.Out, "All agents running.\n")
+	logf(o.Out, "All agents running.\n")
 	return nil
 }
 
@@ -98,7 +98,7 @@ func (o *Orchestrator) driveSession(
 	agents map[string]*config.EffectiveAgent,
 ) error {
 	sbxName := o.SandboxName(agentName)
-	fmt.Fprintf(o.Out, "[%s] attaching agent session on %s\n", agentName, sbxName)
+	logf(o.Out, "[%s] attaching agent session on %s\n", agentName, sbxName)
 
 	// Resolve reach env vars before opening the session.
 	reachEnv, err := o.ApplyReach(ctx, agentName, ea, agents)
@@ -130,7 +130,7 @@ func (o *Orchestrator) driveSession(
 // single agent sandbox to reach the running state.
 func (o *Orchestrator) ensureAgent(ctx context.Context, agentName string, ea *config.EffectiveAgent) error {
 	sbxName := o.SandboxName(agentName)
-	fmt.Fprintf(o.Out, "[%s] ensuring sandbox %s\u2026\n", agentName, sbxName)
+	logf(o.Out, "[%s] ensuring sandbox %s\u2026\n", agentName, sbxName)
 
 	// 1. Find or create — inspect first; only call sbx create when absent.
 	_, inspErr := o.Client.InspectSandbox(ctx, sbxName)
@@ -138,7 +138,7 @@ func (o *Orchestrator) ensureAgent(ctx context.Context, agentName string, ea *co
 		if !sandbox.IsNotFound(inspErr) {
 			return fmt.Errorf("[%s] inspect: %w", agentName, inspErr)
 		}
-		fmt.Fprintf(o.Out, "[%s] creating sandbox %s\n", agentName, sbxName)
+		logf(o.Out, "[%s] creating sandbox %s\n", agentName, sbxName)
 		if err := o.Sbx.Create(ctx, sandbox.CreateRequest{
 			Name:     sbxName,
 			Agent:    ea.AgentKind,
@@ -150,7 +150,7 @@ func (o *Orchestrator) ensureAgent(ctx context.Context, agentName string, ea *co
 			return fmt.Errorf("[%s] create: %w", agentName, err)
 		}
 	} else {
-		fmt.Fprintf(o.Out, "[%s] sandbox %s already exists, reusing\n", agentName, sbxName)
+		logf(o.Out, "[%s] sandbox %s already exists, reusing\n", agentName, sbxName)
 	}
 
 	// 2. Publish declared ports (idempotent diff against existing bindings).
@@ -161,18 +161,18 @@ func (o *Orchestrator) ensureAgent(ctx context.Context, agentName string, ea *co
 	}
 
 	// 3. Start the sandbox (the daemon is idempotent on already-running).
-	fmt.Fprintf(o.Out, "[%s] starting sandbox %s\n", agentName, sbxName)
+	logf(o.Out, "[%s] starting sandbox %s\n", agentName, sbxName)
 	if _, err := o.Client.StartSandbox(ctx, sbxName); err != nil {
 		return fmt.Errorf("[%s] start: %w", agentName, err)
 	}
 
 	// 4. Poll until status == running.
-	fmt.Fprintf(o.Out, "[%s] waiting for running\u2026\n", agentName)
+	logf(o.Out, "[%s] waiting for running\u2026\n", agentName)
 	if err := o.waitRunning(ctx, agentName, sbxName); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(o.Out, "[%s] running \u2713\n", agentName)
+	logf(o.Out, "[%s] running \u2713\n", agentName)
 	return nil
 }
 
@@ -196,11 +196,11 @@ func (o *Orchestrator) publishPorts(ctx context.Context, agentName, sbxName stri
 	}
 
 	if len(toPublish) == 0 {
-		fmt.Fprintf(o.Out, "[%s] all ports already published, skipping\n", agentName)
+		logf(o.Out, "[%s] all ports already published, skipping\n", agentName)
 		return nil
 	}
 
-	fmt.Fprintf(o.Out, "[%s] publishing %d port(s)\n", agentName, len(toPublish))
+	logf(o.Out, "[%s] publishing %d port(s)\n", agentName, len(toPublish))
 	if _, err := o.Client.PublishPorts(ctx, sbxName, toPublish); err != nil {
 		return fmt.Errorf("[%s] publish ports: %w", agentName, err)
 	}

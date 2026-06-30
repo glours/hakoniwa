@@ -50,7 +50,7 @@ func (g *GateWaiter) WaitGates(ctx context.Context, agentName string, ea *config
 			continue // already fired — nothing to wait
 		}
 
-		fmt.Fprintf(g.Out, "[%s] waiting for channel %q (emitter: %s)…\n",
+		logf(g.Out, "[%s] waiting for channel %q (emitter: %s)…\n",
 			agentName, ch, g.Registry.Emitter(ch))
 
 		fired := g.Registry.WaitFired(ch)
@@ -61,7 +61,7 @@ func (g *GateWaiter) WaitGates(ctx context.Context, agentName string, ea *config
 		deadline := time.After(timeout)
 		select {
 		case <-fired:
-			fmt.Fprintf(g.Out, "[%s] channel %q fired ✓\n", agentName, ch)
+			logf(g.Out, "[%s] channel %q fired ✓\n", agentName, ch)
 		case <-deadline:
 			return fmt.Errorf(
 				"[%s] timed out waiting for channel %q to fire (emitter: %s, timeout: %s)",
@@ -86,13 +86,13 @@ func (g *GateWaiter) StageSubscribed(ctx context.Context, agentName, sbxName str
 			// if there is no on_event gate for this channel — in that case the
 			// agent is expected to handle a missing in-file gracefully.
 			// Log a warning and skip staging.
-			fmt.Fprintf(g.Out, "[%s] warning: channel %q not yet fired; skipping staging of in-payload\n",
+			logf(g.Out, "[%s] warning: channel %q not yet fired; skipping staging of in-payload\n",
 				agentName, ch)
 			continue
 		}
 
 		inPath := sandbox.HakoInPath(ch)
-		fmt.Fprintf(g.Out, "[%s] staging payload for channel %q at %s (%d bytes)\n",
+		logf(g.Out, "[%s] staging payload for channel %q at %s (%d bytes)\n",
 			agentName, ch, inPath, len(payload))
 
 		if err := g.Stager.PutFile(ctx, sbxName, inPath, []byte(payload)); err != nil {

@@ -62,7 +62,7 @@ func (o *Orchestrator) ApplyReach(
 		)
 		env[envName] = fmt.Sprintf("%s:%d", reachHostname, hostPort)
 
-		fmt.Fprintf(o.Out, "[%s] reach %s -> %s=%s\n",
+		logf(o.Out, "[%s] reach %s -> %s=%s\n",
 			agentName, r, envName, env[envName])
 	}
 	return env, nil
@@ -97,7 +97,7 @@ func (o *Orchestrator) ensureReachPort(
 	// Determine the host port from the target agent's declared ports, or auto-assign (0).
 	hostPort := resolveHostPort(targetEA, sbxPort)
 
-	fmt.Fprintf(o.Out, "[%s] reach: publishing port %d on %s\n", consumerAgent, sbxPort, targetSbx)
+	logf(o.Out, "[%s] reach: publishing port %d on %s\n", consumerAgent, sbxPort, targetSbx)
 
 	proto := sandboxapi.PortPublishRequestProtocol("tcp")
 	published, err := o.Client.PublishPorts(ctx, targetSbx, []sandbox.PortPublishRequest{

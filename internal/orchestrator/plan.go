@@ -94,7 +94,7 @@ func (o *Orchestrator) Plan(ctx context.Context, project *config.Project) ([]Pla
 		if len(portsToDeclare) > 0 {
 			portStr = " ports=[" + strings.Join(portsToDeclare, ", ") + "]"
 		}
-		fmt.Fprintf(o.Out, "  %s\t%s\t%s%s\n", agentName, sbxName, verb, portStr)
+		logf(o.Out, "  %s\t%s\t%s%s\n", agentName, sbxName, verb, portStr)
 	}
 
 	return entries, nil
@@ -157,14 +157,14 @@ func (o *Orchestrator) Ps(ctx context.Context) ([]PsEntry, error) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 
 	// Print table.
-	fmt.Fprintf(o.Out, "%-20s  %-35s  %-10s  %s\n", "AGENT", "SANDBOX", "STATUS", "PORTS")
-	fmt.Fprintf(o.Out, "%s\n", strings.Repeat("-", 80))
+	logf(o.Out, "%-20s  %-35s  %-10s  %s\n", "AGENT", "SANDBOX", "STATUS", "PORTS")
+	logf(o.Out, "%s\n", strings.Repeat("-", 80))
 	for _, e := range entries {
 		ports := strings.Join(e.Ports, ", ")
 		if ports == "" {
 			ports = "-"
 		}
-		fmt.Fprintf(o.Out, "%-20s  %-35s  %-10s  %s\n", e.Agent, e.Name, e.Status, ports)
+		logf(o.Out, "%-20s  %-35s  %-10s  %s\n", e.Agent, e.Name, e.Status, ports)
 	}
 
 	return entries, nil
@@ -172,5 +172,5 @@ func (o *Orchestrator) Ps(ctx context.Context) ([]PsEntry, error) {
 
 // WritePlanSummary writes a summary header before the per-agent plan lines.
 func WritePlanSummary(out io.Writer, project *config.Project) {
-	fmt.Fprintf(out, "Plan for project %q:\n", project.Name)
+	logf(out, "Plan for project %q:\n", project.Name)
 }
