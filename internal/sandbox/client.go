@@ -8,14 +8,42 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/glours/hakoniwa/internal/sandbox/sandboxapi"
 )
 
-// defaultSocketPath is the fallback Unix socket path for sandboxd.
-// Production code reads DOCKER_SANDBOXES_API first.
-const defaultSocketPath = "/run/sandboxd/sandboxd.sock"
+// defaultLinuxSocketPath is the sandboxd socket path on Linux.
+const defaultLinuxSocketPath = "/run/sandboxd/sandboxd.sock"
+
+// resolveSocketPath returns the sandboxd Unix socket path to use.
+//
+// Resolution order (mirrors docker/sandboxes sandboxlib.SocketPath):
+//  1. DOCKER_SANDBOXES_API env var — used as-is when set.
+//  2. macOS: $HOME/Library/Application Support/com.docker.sandboxes/sandboxes/sandboxd/sandboxd.sock
+//  3. Linux fallback: /run/sandboxd/sandboxd.sock
+//
+// The macOS path is derived from the storagekit platform ID
+// (com.docker.sandboxes) and default app name (sandboxes) used by
+// docker/sandboxes (sandboxlib/storagepaths package).
+func resolveSocketPath() string {
+	if v := os.Getenv("DOCKER_SANDBOXES_API"); v != "" {
+		return v
+	}
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(
+				home,
+				"Library", "Application Support",
+				"com.docker.sandboxes", "sandboxes", "sandboxd", "sandboxd.sock",
+			)
+		}
+	}
+	return defaultLinuxSocketPath
+}
 
 // NotFoundError is returned by Client methods when the daemon returns HTTP 404.
 type NotFoundError struct {
@@ -90,13 +118,10 @@ type DaemonClient struct {
 }
 
 // NewDaemonClient creates a DaemonClient that dials the sandboxd Unix socket.
-// The socket path is read from $DOCKER_SANDBOXES_API, falling back to
-// defaultSocketPath.
+// The socket path is resolved via resolveSocketPath (DOCKER_SANDBOXES_API,
+// then macOS platform path, then Linux fallback).
 func NewDaemonClient() (*DaemonClient, error) {
-	socketPath := os.Getenv("DOCKER_SANDBOXES_API")
-	if socketPath == "" {
-		socketPath = defaultSocketPath
-	}
+	socketPath := resolveSocketPath()
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	dialFn := func(ctx context.Context) (net.Conn, error) {
