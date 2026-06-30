@@ -87,7 +87,72 @@ func (o *Orchestrator) Up(ctx context.Context, project *config.Project) error {
 	return nil
 }
 
-// driveSession opens an agent session, drives it to completion, and fires
+// defaultSessionRetryDelays is the backoff schedule applied when
+// AttachAgentSession returns a 404 right after a sandbox reaches running.
+// The daemon reports status=running before its exec endpoints are fully
+// registered; a window of ~500ms of 404 responses is normal on first attach.
+var defaultSessionRetryDelays = []time.Duration{
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+}
+
+// sessionRetryDelays returns the configured retry delays or the package default.
+func (o *Orchestrator) sessionRetryDelays() []time.Duration {
+	if len(o.SessionRetryDelays) > 0 {
+		return o.SessionRetryDelays
+	}
+	return defaultSessionRetryDelays
+}
+
+// attachSessionWithRetry calls Driver.AttachAgentSession with exponential
+// backoff on 404 (not-found). The daemon reports status=running before its
+// exec endpoints are fully registered, creating a brief window where
+// AttachAgentSession returns 404 even though the sandbox is running.
+//
+// This mirrors the implicit settling that sbx run achieves via the sentinel
+// connection (GET /sandbox/{name}/session, operationId: sessionHold), which
+// blocks until the daemon's session lifecycle is settled. We cannot use the
+// sentinel in non-interactive orchestrator mode, so we retry instead.
+func (o *Orchestrator) attachSessionWithRetry(
+	ctx context.Context,
+	agentName, sbxName string,
+	req sandboxapi.AgentSessionRequest,
+) (sandbox.Session, error) {
+	delays := o.sessionRetryDelays()
+	maxAttempts := len(delays) + 1
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		sess, err := o.Driver.AttachAgentSession(ctx, sbxName, req)
+		if err == nil {
+			return sess, nil
+		}
+		// Only retry on 404; other errors (400, 422, 5xx) are not transient.
+		if !sandbox.IsNotFound(err) {
+			return nil, err
+		}
+		// Last attempt — give up.
+		if attempt == maxAttempts-1 {
+			return nil, fmt.Errorf(
+				"[%s] agent session still not ready after %d attempts: %w",
+				agentName, maxAttempts, err,
+			)
+		}
+		delay := delays[attempt]
+		logf(o.Out, "[%s] agent session not ready, retrying in %s\u2026 (attempt %d/%d)\n",
+			agentName, delay, attempt+1, maxAttempts)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	// unreachable
+	return nil, fmt.Errorf("[%s] attach session: exhausted retries", agentName)
+}
+
 // any channels the agent emits. Reach env vars (HAKO_REACH_*) are resolved
 // before opening the session and forwarded in AgentSessionRequest.Env.
 func (o *Orchestrator) driveSession(
@@ -111,7 +176,7 @@ func (o *Orchestrator) driveSession(
 		env = &reachEnv
 	}
 
-	session, err := o.Driver.AttachAgentSession(ctx, sbxName, sandboxapi.AgentSessionRequest{
+	session, err := o.attachSessionWithRetry(ctx, agentName, sbxName, sandboxapi.AgentSessionRequest{
 		Env: env,
 	})
 	if err != nil {

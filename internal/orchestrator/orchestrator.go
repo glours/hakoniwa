@@ -29,6 +29,13 @@ type Orchestrator struct {
 	// (backward-compatible with infrastructure-only tests).
 	Driver sandbox.SessionDriver
 	Stager sandbox.FileStager
+
+	// SessionRetryDelays controls the backoff schedule used when
+	// AttachAgentSession returns a 404 immediately after a sandbox reaches
+	// the running state (race between VM status and exec-endpoint readiness).
+	// Each element is the wait before the next attempt. Nil means the
+	// package default (500ms → 1s → 2s → 4s → 8s, 6 attempts total).
+	SessionRetryDelays []time.Duration
 }
 
 // NewOrchestrator creates an Orchestrator with sensible poll defaults.
