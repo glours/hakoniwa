@@ -48,10 +48,11 @@ func runPlan(cmd *cobra.Command, file string) error {
 		return err
 	}
 
-	orchestrator.WritePlanSummary(cmd.OutOrStdout(), lr.Project)
-	if _, err := orch.Plan(cmd.Context(), lr.Project); err != nil {
-		fmt.Fprintf(os.Stderr, "hako plan: %v\n", err)
+	entries, err := orch.Plan(cmd.Context(), lr.Project)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "hako plan: %v\n", err)
 		return err
 	}
+	orchestrator.RenderPlan(cmd.OutOrStdout(), lr.Project.Name, entries)
 	return nil
 }

@@ -71,8 +71,8 @@ func TestPlanConvergeMissingPort(t *testing.T) {
 	if len(entries) != 1 || entries[0].Action != ActionConverge {
 		t.Errorf("expected converge, got %+v", entries)
 	}
-	if len(entries[0].Ports) != 1 || entries[0].Ports[0] != "9000:9000" {
-		t.Errorf("missing ports = %v", entries[0].Ports)
+	if len(entries[0].AddPorts) != 1 || entries[0].AddPorts[0] != "9000:9000" {
+		t.Errorf("missing ports = %v", entries[0].AddPorts)
 	}
 }
 

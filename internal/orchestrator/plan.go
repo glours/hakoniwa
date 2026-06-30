@@ -3,8 +3,6 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"io"
-	"sort"
 	"strings"
 
 	"github.com/glours/hakoniwa/internal/config"
@@ -20,20 +18,31 @@ const (
 	ActionConverge AgentAction = "converge" // sandbox exists; ports/config differ
 )
 
-// PlanEntry is one line in the plan output.
+// PlanEntry contains everything the renderer needs to display one agent.
 type PlanEntry struct {
-	Agent   string
-	Sandbox string
-	Action  AgentAction
-	Ports   []string // port specs that would be published
+	Agent         string
+	Sandbox       string
+	Action        AgentAction
+	AgentKind     string
+	Template      string
+	CurrentStatus string // populated for reuse/converge
+
+	// Declared configuration (for display)
+	AllPorts   []string // all declared ports
+	AddPorts   []string // ports to add (converge delta)
+	SecretEnvs []string // env-var names only, never values
+	Emits      []string
+	DependsOn  map[string]config.DependsOnEntry
+	Reach      []string
+	Kits       []string
 }
 
 // Plan computes what hako up would do without making any changes.
 // It validates the project, resolves agents, builds the graph, then compares
 // desired state against live daemon state.
 //
-// Returns a slice of PlanEntry in topo order and writes a human-readable
-// summary to o.Out.
+// Returns a slice of PlanEntry in topo order. Rendering is handled separately
+// by RenderPlan so callers can format the output however they prefer.
 func (o *Orchestrator) Plan(ctx context.Context, project *config.Project) ([]PlanEntry, error) {
 	lr := &config.LoadResult{Project: project}
 	if verr := config.Validate(lr); verr != nil {
@@ -52,11 +61,12 @@ func (o *Orchestrator) Plan(ctx context.Context, project *config.Project) ([]Pla
 		sbxName := o.SandboxName(agentName)
 
 		action := ActionCreate
-		var portsToDeclare []string
+		var addPorts []string
+		var currentStatus string
 
 		info, err := o.Client.InspectSandbox(ctx, sbxName)
 		if err == nil {
-			// Sandbox exists — check if ports differ.
+			currentStatus = string(info.Status)
 			existing, _ := o.Client.ListPublishedPorts(ctx, sbxName)
 			var missing []string
 			for _, spec := range ea.Ports {
@@ -70,39 +80,55 @@ func (o *Orchestrator) Plan(ctx context.Context, project *config.Project) ([]Pla
 			}
 			if len(missing) > 0 || needsConverge(info, ea) {
 				action = ActionConverge
-				portsToDeclare = missing
+				addPorts = missing
 			} else {
 				action = ActionReuse
 			}
 		} else if !sandbox.IsNotFound(err) {
 			return nil, fmt.Errorf("[%s] inspect: %w", agentName, err)
-		} else {
-			// Not found — would create.
-			portsToDeclare = append([]string(nil), ea.Ports...)
 		}
 
-		entry := PlanEntry{
-			Agent:   agentName,
-			Sandbox: sbxName,
-			Action:  action,
-			Ports:   portsToDeclare,
+		// Collect secret env names (never values).
+		var secretEnvs []string
+		for _, s := range ea.Secrets {
+			if s.Env != "" {
+				secretEnvs = append(secretEnvs, s.Env)
+			}
 		}
-		entries = append(entries, entry)
+		for _, s := range ea.Credentials {
+			if s.Env != "" {
+				secretEnvs = append(secretEnvs, s.Env)
+			}
+		}
 
-		verb := string(action)
-		portStr := ""
-		if len(portsToDeclare) > 0 {
-			portStr = " ports=[" + strings.Join(portsToDeclare, ", ") + "]"
+		// Copy DependsOn map.
+		depsCopy := make(map[string]config.DependsOnEntry, len(ea.DependsOn))
+		for k, v := range ea.DependsOn {
+			depsCopy[k] = v
 		}
-		logf(o.Out, "  %s\t%s\t%s%s\n", agentName, sbxName, verb, portStr)
+
+		entries = append(entries, PlanEntry{
+			Agent:         agentName,
+			Sandbox:       sbxName,
+			Action:        action,
+			AgentKind:     ea.AgentKind,
+			Template:      ea.Template,
+			CurrentStatus: currentStatus,
+			AllPorts:      append([]string(nil), ea.Ports...),
+			AddPorts:      addPorts,
+			SecretEnvs:    secretEnvs,
+			Emits:         append([]string(nil), ea.Emits...),
+			DependsOn:     depsCopy,
+			Reach:         append([]string(nil), ea.Reach...),
+			Kits:          append([]string(nil), ea.Kits...),
+		})
 	}
 
 	return entries, nil
 }
 
 // needsConverge returns true if the sandbox info differs from what the agent
-// declares in terms of agent kind or template. Port differences are handled
-// separately in Plan.
+// declares in terms of agent kind. Port differences are handled separately.
 func needsConverge(info *sandbox.SandboxInfo, ea *config.EffectiveAgent) bool {
 	if info.Agent != nil && *info.Agent != ea.AgentKind {
 		return true
@@ -144,7 +170,6 @@ func (o *Orchestrator) Ps(ctx context.Context) ([]PsEntry, error) {
 		for _, p := range ports {
 			portStrs = append(portStrs, fmt.Sprintf("%d:%d/%s", p.HostPort, p.SandboxPort, p.Protocol))
 		}
-		sort.Strings(portStrs)
 
 		entries = append(entries, PsEntry{
 			Agent:  agentName,
@@ -154,23 +179,13 @@ func (o *Orchestrator) Ps(ctx context.Context) ([]PsEntry, error) {
 		})
 	}
 
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-
-	// Print table.
-	logf(o.Out, "%-20s  %-35s  %-10s  %s\n", "AGENT", "SANDBOX", "STATUS", "PORTS")
-	logf(o.Out, "%s\n", strings.Repeat("-", 80))
-	for _, e := range entries {
-		ports := strings.Join(e.Ports, ", ")
-		if ports == "" {
-			ports = "-"
+	// Sort by sandbox name for stable output.
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].Name < entries[j-1].Name; j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
 		}
-		logf(o.Out, "%-20s  %-35s  %-10s  %s\n", e.Agent, e.Name, e.Status, ports)
 	}
 
+	RenderPs(o.Out, o.ProjectName, entries)
 	return entries, nil
-}
-
-// WritePlanSummary writes a summary header before the per-agent plan lines.
-func WritePlanSummary(out io.Writer, project *config.Project) {
-	logf(out, "Plan for project %q:\n", project.Name)
 }
